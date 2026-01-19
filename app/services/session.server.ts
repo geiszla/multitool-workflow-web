@@ -28,11 +28,11 @@ const SESSION_MAX_AGE = 60 * 60 * 24 * 30 // 30 days in seconds
 
 // User type for session data
 export interface SessionUser {
-  id: string // GitHub user ID
+  id: string // Internal user UUID
   githubLogin: string
-  name: string | null
+  name?: string
   avatarUrl: string
-  email: string | null
+  email?: string
 }
 
 // Session data structure

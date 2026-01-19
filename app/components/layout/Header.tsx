@@ -8,15 +8,15 @@ import {
   UnstyledButton,
 } from '@mantine/core'
 import {
-  IconLayoutDashboard,
   IconLogout,
+  IconRobot,
   IconSettings,
 } from '@tabler/icons-react'
 import { Form, Link } from 'react-router'
 
 interface HeaderProps {
   user?: {
-    name: string | null
+    name?: string
     avatarUrl: string
     githubLogin: string
   } | null
@@ -58,16 +58,17 @@ export function Header({ user }: HeaderProps) {
                   <Menu.Divider />
 
                   <Menu.Item
-                    leftSection={<IconLayoutDashboard size={16} />}
+                    leftSection={<IconRobot size={16} />}
                     component={Link}
-                    to="/dashboard"
+                    to="/agents"
                   >
-                    Dashboard
+                    Agents
                   </Menu.Item>
 
                   <Menu.Item
                     leftSection={<IconSettings size={16} />}
-                    disabled
+                    component={Link}
+                    to="/settings"
                   >
                     Settings
                   </Menu.Item>

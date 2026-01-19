@@ -1,6 +1,7 @@
 import type { Route } from './+types/auth.github.callback'
 import { Center, Loader, Stack, Text, Title } from '@mantine/core'
 import { redirect } from 'react-router'
+import { saveExternalAuth } from '~/models/external-auth.server'
 import { upsertUser } from '~/models/user.server'
 import { getAndClearReturnTo, getAuthenticator } from '~/services/auth.server'
 import { createUserSession } from '~/services/session.server'
@@ -11,7 +12,8 @@ import { createUserSession } from '~/services/session.server'
  * This route handles the OAuth callback by:
  * 1. Completing the OAuth flow via remix-auth
  * 2. Creating/updating the user in Firestore
- * 3. Creating a session and redirecting to the dashboard
+ * 3. Storing the GitHub access token (encrypted with KMS)
+ * 4. Creating a session and redirecting to the agents page
  */
 export async function loader({ request }: Route.LoaderArgs) {
   const url = new URL(request.url)
@@ -30,26 +32,31 @@ export async function loader({ request }: Route.LoaderArgs) {
   }
 
   try {
-    // Complete the OAuth flow and get the GitHub user
+    // Complete the OAuth flow and get the GitHub user + access token
     const authenticator = await getAuthenticator()
-    const githubUser = await authenticator.authenticate('github', request)
+    const { user: githubUser, accessToken } = await authenticator.authenticate('github', request)
 
     // Get the returnTo URL and clear the cookie
     const { returnTo, clearCookie } = await getAndClearReturnTo(request)
 
     // Create or update the user in Firestore
-    await upsertUser({
-      id: String(githubUser.id),
+    // Returns internal UUID (not GitHub ID)
+    const userId = await upsertUser({
+      githubId: String(githubUser.id),
       githubLogin: githubUser.login,
       name: githubUser.name,
       email: githubUser.email,
       avatarUrl: githubUser.avatarUrl,
     })
 
+    // Store the GitHub access token encrypted with KMS
+    // This token is used for GitHub API calls when creating agents
+    await saveExternalAuth(userId, 'github', accessToken)
+
     // Create the user session (this will redirect)
     const sessionResponse = await createUserSession({
       request,
-      userId: String(githubUser.id),
+      userId,
       redirectTo: returnTo,
     })
 
@@ -63,6 +70,10 @@ export async function loader({ request }: Route.LoaderArgs) {
     })
   }
   catch (error) {
+    // Re-throw Response objects (remix-auth uses them for redirects)
+    if (error instanceof Response) {
+      throw error
+    }
     // Log error without sensitive details (OAuth codes, tokens could be in error)
     console.error('OAuth callback error:', error instanceof Error ? error.message : 'Unknown error')
     return redirect('/?error=auth_failed')

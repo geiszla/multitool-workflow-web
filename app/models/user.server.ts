@@ -1,7 +1,11 @@
 /**
  * User data model and Firestore operations.
  *
- * Users are stored in Firestore with their GitHub ID as the document ID.
+ * Users are stored in Firestore with an internal UUID as the document ID.
+ * This allows supporting multiple authentication providers in the future.
+ *
+ * Migration: Existing users using GitHub ID as document ID will be migrated
+ * on their next login (lazy migration).
  */
 
 import { Timestamp } from '@google-cloud/firestore'
@@ -11,9 +15,11 @@ import { getFirestore } from '~/services/firestore.server'
  * User document structure in Firestore.
  */
 export interface User {
+  id: string // Internal UUID (same as document ID)
+  githubId: string // GitHub user ID (for OAuth reference)
   githubLogin: string
-  name: string | null
-  email: string | null
+  name?: string
+  email?: string
   avatarUrl: string
   createdAt: Timestamp
   updatedAt: Timestamp
@@ -24,7 +30,7 @@ export interface User {
  * Input for creating or updating a user.
  */
 export interface UpsertUserInput {
-  id: string
+  githubId: string // GitHub user ID
   githubLogin: string
   name: string | null
   email: string | null
@@ -35,43 +41,87 @@ const USERS_COLLECTION = 'users'
 
 /**
  * Creates or updates a user in Firestore.
- * Uses the GitHub ID as the document ID.
+ *
+ * For new users: Creates with a new internal UUID.
+ * For existing users: Looks up by githubId, migrates if needed (old doc used GitHub ID as doc ID).
+ *
+ * Returns the internal user ID (UUID).
  */
-export async function upsertUser(input: UpsertUserInput): Promise<void> {
+export async function upsertUser(input: UpsertUserInput): Promise<string> {
   const db = getFirestore()
-  const userRef = db.collection(USERS_COLLECTION).doc(input.id)
   const now = Timestamp.now()
 
-  const existingUser = await userRef.get()
+  // First, try to find existing user by githubId
+  const existingUser = await getUserByGitHubId(input.githubId)
 
-  if (existingUser.exists) {
+  if (existingUser) {
     // Update existing user
+    const userRef = db.collection(USERS_COLLECTION).doc(existingUser.id)
     await userRef.update({
       githubLogin: input.githubLogin,
-      name: input.name,
-      email: input.email,
+      name: input.name ?? undefined,
+      email: input.email ?? undefined,
       avatarUrl: input.avatarUrl,
       updatedAt: now,
       lastLoginAt: now,
     })
+    return existingUser.id
   }
-  else {
-    // Create new user
-    const user: User = {
+
+  // Check for legacy user (document ID is GitHub ID instead of UUID)
+  // This handles migration from the old data model
+  const legacyUserRef = db.collection(USERS_COLLECTION).doc(input.githubId)
+  const legacyDoc = await legacyUserRef.get()
+
+  if (legacyDoc.exists) {
+    // Migrate legacy user to new schema
+    const legacyData = legacyDoc.data()!
+    const newUserId = crypto.randomUUID()
+
+    const migratedUser: User = {
+      id: newUserId,
+      githubId: input.githubId,
       githubLogin: input.githubLogin,
-      name: input.name,
-      email: input.email,
+      name: input.name ?? undefined,
+      email: input.email ?? undefined,
       avatarUrl: input.avatarUrl,
-      createdAt: now,
+      createdAt: legacyData.createdAt as Timestamp,
       updatedAt: now,
       lastLoginAt: now,
     }
-    await userRef.set(user)
+
+    // Create new document with UUID, delete legacy document
+    // Use batch for atomicity
+    const batch = db.batch()
+    batch.set(db.collection(USERS_COLLECTION).doc(newUserId), migratedUser)
+    batch.delete(legacyUserRef)
+    await batch.commit()
+
+    // eslint-disable-next-line no-console
+    console.log(`Migrated user ${input.githubLogin} from legacy doc ${input.githubId} to ${newUserId}`)
+    return newUserId
   }
+
+  // Create new user with UUID
+  const newUserId = crypto.randomUUID()
+  const user: User = {
+    id: newUserId,
+    githubId: input.githubId,
+    githubLogin: input.githubLogin,
+    name: input.name ?? undefined,
+    email: input.email ?? undefined,
+    avatarUrl: input.avatarUrl,
+    createdAt: now,
+    updatedAt: now,
+    lastLoginAt: now,
+  }
+
+  await db.collection(USERS_COLLECTION).doc(newUserId).set(user)
+  return newUserId
 }
 
 /**
- * Gets a user by their GitHub ID.
+ * Gets a user by their internal UUID.
  */
 export async function getUserById(id: string): Promise<User | null> {
   const db = getFirestore()
@@ -86,11 +136,32 @@ export async function getUserById(id: string): Promise<User | null> {
 }
 
 /**
+ * Gets a user by their GitHub ID.
+ * Uses an indexed query for efficient lookup.
+ */
+export async function getUserByGitHubId(
+  githubId: string,
+): Promise<User | null> {
+  const db = getFirestore()
+  const snapshot = await db
+    .collection(USERS_COLLECTION)
+    .where('githubId', '==', githubId)
+    .limit(1)
+    .get()
+
+  if (snapshot.empty) {
+    return null
+  }
+
+  return snapshot.docs[0].data() as User
+}
+
+/**
  * Gets a user by their GitHub login (username).
  */
 export async function getUserByGitHubLogin(
   githubLogin: string,
-): Promise<{ id: string, user: User } | null> {
+): Promise<User | null> {
   const db = getFirestore()
   const snapshot = await db
     .collection(USERS_COLLECTION)
@@ -102,9 +173,5 @@ export async function getUserByGitHubLogin(
     return null
   }
 
-  const doc = snapshot.docs[0]
-  return {
-    id: doc.id,
-    user: doc.data() as User,
-  }
+  return snapshot.docs[0].data() as User
 }

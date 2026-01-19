@@ -29,6 +29,14 @@ export interface GitHubUser {
   avatarUrl: string
 }
 
+/**
+ * GitHub auth result including user data and access token.
+ */
+export interface GitHubAuthResult {
+  user: GitHubUser
+  accessToken: string
+}
+
 // OAuth scopes required by the application
 const OAUTH_SCOPES = ['read:user', 'user:email', 'repo'] as const
 
@@ -37,7 +45,7 @@ const RETURN_TO_COOKIE_MAX_AGE = 60 * 10 // 10 minutes
 
 // Lazy-initialized authenticator (secrets may be unavailable at build time)
 // Note: We cache successful initialization but NOT failures, allowing retry on next request
-let authenticatorCache: Authenticator<GitHubUser> | null = null
+let authenticatorCache: Authenticator<GitHubAuthResult> | null = null
 
 // Lazy-initialized returnTo cookie
 // Note: We cache successful initialization but NOT failures, allowing retry on next request
@@ -71,7 +79,7 @@ async function getReturnToCookie() {
  * Only allows relative paths starting with "/" but rejects protocol-relative URLs
  * like "//evil.com" or paths with backslashes that could be exploited.
  */
-export function sanitizeReturnTo(input: string | null, fallback = '/dashboard'): string {
+export function sanitizeReturnTo(input: string | null, fallback = '/agents'): string {
   if (!input)
     return fallback
 
@@ -128,7 +136,7 @@ export async function getAndClearReturnTo(
  * Creates the authenticator with the GitHub strategy.
  * Uses lazy initialization because secrets may not be available at build time.
  */
-async function createAuthenticator(): Promise<Authenticator<GitHubUser>> {
+async function createAuthenticator(): Promise<Authenticator<GitHubAuthResult>> {
   const clientId = await getSecret('github-client-id')
   const clientSecret = await getSecret('github-client-secret')
 
@@ -149,7 +157,7 @@ async function createAuthenticator(): Promise<Authenticator<GitHubUser>> {
           httpOnly: true,
         } as const)
 
-  const authenticator = new Authenticator<GitHubUser>()
+  const authenticator = new Authenticator<GitHubAuthResult>()
 
   authenticator.use(
     new GitHubStrategy(
@@ -161,9 +169,10 @@ async function createAuthenticator(): Promise<Authenticator<GitHubUser>> {
         cookie: oauthCookie,
       },
       async ({ tokens }) => {
+        const accessToken = tokens.accessToken()
         // Fetch user information from GitHub
-        const user = await fetchGitHubUser(tokens.accessToken())
-        return user
+        const user = await fetchGitHubUser(accessToken)
+        return { user, accessToken }
       },
     ),
     'github',
@@ -176,7 +185,7 @@ async function createAuthenticator(): Promise<Authenticator<GitHubUser>> {
  * Gets or creates the authenticator instance.
  * Note: We cache successful initialization but NOT failures, allowing retry on next request.
  */
-export async function getAuthenticator(): Promise<Authenticator<GitHubUser>> {
+export async function getAuthenticator(): Promise<Authenticator<GitHubAuthResult>> {
   // Return cached authenticator if already successfully initialized
   if (authenticatorCache) {
     return authenticatorCache

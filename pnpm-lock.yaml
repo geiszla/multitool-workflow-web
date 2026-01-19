@@ -8,9 +8,15 @@ importers:
 
   .:
     dependencies:
+      '@google-cloud/compute':
+        specifier: ^6.6.0
+        version: 6.6.0
       '@google-cloud/firestore':
         specifier: ^8.2.0
         version: 8.2.0
+      '@google-cloud/kms':
+        specifier: ^5.2.1
+        version: 5.2.1
       '@google-cloud/secret-manager':
         specifier: ^6.1.1
         version: 6.1.1
@@ -595,8 +601,16 @@ packages:
   '@floating-ui/utils@0.2.10':
     resolution: {integrity: sha512-aGTxbpbg8/b5JfU1HXSrbH3wXZuLPJcNEcZQFMxLs3oSzgtVu6nFPkbbGGUvBcUjKV2YyB9Wxxabo+HEH9tcRQ==}
 
+  '@google-cloud/compute@6.6.0':
+    resolution: {integrity: sha512-BWV+Mkn4yNujmqifotplQIQFp3HOHfiFLkff06CHf6mkrxyCtczv6NZwXmpVOl2m4EajduQomNWLEABDfqqy0Q==}
+    engines: {node: '>=18'}
+
   '@google-cloud/firestore@8.2.0':
     resolution: {integrity: sha512-dhpoNT+CcpHCiukuJPjGKH//WCicWPAPE5plOOQxDSGOzLuDzhOA7MNS+n69kA1FekHCpXKSPpSaCySz4t5ftQ==}
+    engines: {node: '>=18'}
+
+  '@google-cloud/kms@5.2.1':
+    resolution: {integrity: sha512-IE1HdWGymB7/gGtGbevbpHfZZSUT/xKmpJUWIJYJoJ1QHHYH5jdrl5jsIfMo8kyWAErP7nwgwU++LaUZBhXL9A==}
     engines: {node: '>=18'}
 
   '@google-cloud/secret-manager@6.1.1':
@@ -3628,6 +3642,12 @@ snapshots:
 
   '@floating-ui/utils@0.2.10': {}
 
+  '@google-cloud/compute@6.6.0':
+    dependencies:
+      google-gax: 5.0.6
+    transitivePeerDependencies:
+      - supports-color
+
   '@google-cloud/firestore@8.2.0':
     dependencies:
       '@opentelemetry/api': 1.9.0
@@ -3635,6 +3655,12 @@ snapshots:
       functional-red-black-tree: 1.0.1
       google-gax: 5.0.6
       protobufjs: 7.5.4
+    transitivePeerDependencies:
+      - supports-color
+
+  '@google-cloud/kms@5.2.1':
+    dependencies:
+      google-gax: 5.0.6
     transitivePeerDependencies:
       - supports-color
 

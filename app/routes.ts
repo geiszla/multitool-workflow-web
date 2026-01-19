@@ -16,6 +16,8 @@ export default [
 
   // Authenticated app routes
   layout('routes/_app.tsx', [
-    route('dashboard', 'routes/_app.dashboard.tsx'),
+    route('agents', 'routes/_app.agents.tsx'),
+    route('agents/:id', 'routes/_app.agents.$id.tsx'),
+    route('settings', 'routes/_app.settings.tsx'),
   ]),
 ] satisfies RouteConfig
