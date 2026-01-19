@@ -1,0 +1,37 @@
+# Build outputs
+.react-router
+build
+
+# Dependencies (will be installed fresh in Docker)
+node_modules
+
+# Documentation
+README.md
+OVERVIEW.md
+PLAN.md
+
+# Git
+.git
+.gitignore
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# Test files
+*.test.ts
+*.test.tsx
+*.spec.ts
+*.spec.tsx
+__tests__
+
+# Development files
+.eslintrc*
+.prettierrc*
+tsconfig.tsbuildinfo
+
+# OS files
+.DS_Store
+Thumbs.db
