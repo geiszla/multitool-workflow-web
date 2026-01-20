@@ -1,0 +1,46 @@
+[Unit]
+Description=Agent Bootstrap Service
+After=network-online.target
+Wants=network-online.target
+Before=pty-server.service
+
+# Run only once: skip if marker exists OR if env file missing
+ConditionPathExists=!/var/lib/agent-bootstrap/done
+ConditionPathExists=/etc/default/agent-env
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=agent
+WorkingDirectory=/opt/vm-agent
+EnvironmentFile=/etc/default/agent-env
+ExecStart=/usr/bin/node bootstrap.js
+# Note: bootstrap.js creates the marker file on success at /var/lib/agent-bootstrap/done
+
+# State directory for bootstrap coordination (writable by agent user)
+# Creates /var/lib/agent-bootstrap owned by agent:agent
+StateDirectory=agent-bootstrap
+
+# Security hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+# Allow writes to:
+# - /home/agent/workspace: for git clone
+# - /home/agent/.claude.json: for Claude configuration
+# - /etc/default/pty-server: for API keys
+# - StateDirectory handles /var/lib/agent-bootstrap
+ReadWritePaths=/home/agent/workspace /home/agent/.claude.json /etc/default/pty-server
+
+# Retry handling for transient failures
+Restart=on-failure
+RestartSec=10
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

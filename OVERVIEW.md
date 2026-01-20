@@ -200,7 +200,7 @@ The server applies comprehensive security headers:
 - Service Account: `agent-vm@{project}.iam.gserviceaccount.com`
   - `roles/datastore.user`
 - Cloud NAT for outbound internet access
-- Custom image with Claude Code pre-installed (or startup script)
+- Custom image family: `multitool-agent` (pre-built with Claude Code)
 
 ### Firestore Indexes
 - `users`: `githubId` ASC (for OAuth lookup)
@@ -216,6 +216,75 @@ The server applies comprehensive security headers:
 - Multi-stage Dockerfile with pnpm
 - Cloud Build CI/CD on push to main
 - Health check at `/healthz`
+
+## VM Image Build Pipeline
+
+Pre-built VM images reduce agent startup time from ~10-15 minutes to ~3-6 minutes.
+
+### Image Contents
+- Debian 12 base
+- Node.js 24 LTS (via signed apt repository)
+- Build tools: `build-essential`, `python3`, `git`, `jq`
+- Claude CLI (`@anthropic-ai/claude-code`)
+- npm dependencies (`node-pty`, `ws`) pre-installed
+- systemd service templates (disabled by default)
+
+### Image Family & Versioning
+- Family: `multitool-agent`
+- Image naming: `multitool-agent-{build-id}`
+- Labels: `managed-by=packer`, `git-sha`, `build-id`, `node-version`
+- Retention: Last 5 images kept, older images auto-deleted
+
+### Build Trigger
+- **Automated**: Weekly via Cloud Scheduler (Sundays 02:00 UTC)
+- **Manual**: `./scripts/build-vm-image.sh`
+- **Cloud Build config**: `cloudbuild-packer.yaml`
+
+### Rollback Procedure
+1. Set `AGENT_SOURCE_IMAGE` env var to specific image name:
+   ```bash
+   gcloud run services update multitool-workflow-web \
+     --set-env-vars=AGENT_SOURCE_IMAGE=projects/multitool-workflow-web/global/images/multitool-agent-YYYYMMDD
+   ```
+2. New VMs will use the pinned image
+3. To return to latest: remove the env var
+
+### Cloud Scheduler Setup
+```bash
+# Create Pub/Sub topic
+gcloud pubsub topics create packer-build-trigger
+
+# Create Cloud Build trigger
+gcloud builds triggers create pubsub \
+  --name=build-vm-image \
+  --topic=projects/multitool-workflow-web/topics/packer-build-trigger \
+  --build-config=cloudbuild-packer.yaml
+
+# Create scheduler job
+gcloud scheduler jobs create pubsub weekly-vm-image-build \
+  --schedule="0 2 * * 0" \
+  --time-zone="UTC" \
+  --topic=packer-build-trigger \
+  --message-body='{"trigger": "scheduled"}' \
+  --location=europe-west3
+```
+
+### Operational Runbook
+
+**Inspect image labels:**
+```bash
+gcloud compute images describe IMAGE_NAME --format="yaml(labels)"
+```
+
+**Check systemd health on instances:**
+```bash
+journalctl -u agent-bootstrap -u pty-server
+```
+
+**Manual image build:**
+```bash
+./scripts/build-vm-image.sh
+```
 
 ## WebSocket Architecture (Part 3)
 
@@ -276,17 +345,18 @@ type WSMessage
 
 ## VM Startup Flow
 
-Uses systemd services for reliable orchestration:
+Uses pre-built image + systemd services for reliable orchestration:
 
 1. **Startup Script** (runs on VM boot):
-   - Installs Node.js, git, Claude Code CLI
-   - Writes systemd unit files
-   - Enables and starts services
+   - Creates `/etc/default/agent-env` with user-specific config
+   - Enables and starts systemd services
+   - (All dependencies pre-installed in image)
 
-2. **agent-bootstrap.service** (oneshot):
+2. **agent-bootstrap.service** (oneshot, runs once per VM):
+   - Skipped if marker file exists (VM restart/resume)
    - Fetches credentials via GCE instance identity token
-   - Reports internal IP to Cloud Run
    - Clones repository with GitHub token
+   - Configures Claude Code with MCP servers
    - Updates status to 'running' on success
 
 3. **pty-server.service** (long-running):
@@ -294,6 +364,8 @@ Uses systemd services for reliable orchestration:
    - Starts WebSocket server on :8080
    - Spawns Claude Code in PTY
    - Reports `terminalReady: true`
+
+**Idempotency**: Bootstrap only runs on initial provision (marker file `/var/lib/agent-bootstrap/done`). VM restarts skip bootstrap and resume the existing session.
 
 ## Credential Flow
 

@@ -1,0 +1,36 @@
+[Unit]
+Description=PTY WebSocket Server
+After=agent-bootstrap.service
+Wants=agent-bootstrap.service
+ConditionPathExists=/etc/default/agent-env
+
+[Service]
+Type=simple
+User=agent
+WorkingDirectory=/opt/vm-agent
+EnvironmentFile=/etc/default/agent-env
+EnvironmentFile=/etc/default/pty-server
+ExecStart=/usr/bin/node pty-server.js
+Restart=on-failure
+RestartSec=5
+
+# State directory for reading bootstrap output (same as agent-bootstrap.service)
+# Must use same StateDirectory to share state between services
+StateDirectory=agent-bootstrap
+
+# Security hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+# Allow writes to:
+# - /home/agent/workspace: for Claude Code file operations
+# - /home/agent: for npm cache, Claude config updates
+# - StateDirectory provides read access to /var/lib/agent-bootstrap
+ReadWritePaths=/home/agent/workspace /home/agent
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
