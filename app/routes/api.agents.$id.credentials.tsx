@@ -17,11 +17,17 @@
 import type { Route } from './+types/api.agents.$id.credentials'
 import { getAgent } from '~/models/agent.server'
 import { getExternalAuth } from '~/models/external-auth.server'
+import { getUserById } from '~/models/user.server'
 import {
   extractAgentId,
   extractBearerToken,
   verifyGceIdentityToken,
 } from '~/services/gce-identity.server'
+import {
+  getCompedClaudeApiKey,
+  getCompedCodexApiKey,
+  getCompedFigmaApiKey,
+} from '~/services/secrets.server'
 
 /**
  * Helper to create JSON responses.
@@ -37,6 +43,7 @@ interface CredentialsResponse {
   githubToken?: string
   claudeApiKey?: string
   codexApiKey?: string
+  figmaApiKey?: string
   needsResume?: boolean
   repoOwner: string
   repoName: string
@@ -88,16 +95,48 @@ export async function loader({ request, params }: Route.LoaderArgs) {
   // eslint-disable-next-line no-console
   console.log(`Credentials API: Fetching credentials for agent ${agentId}, user ${agent.userId}`)
 
+  // Fetch user to check if they're comped
+  const user = await getUserById(agent.userId)
+  const isComped = user?.isComped ?? false
+
   // Fetch credentials for the agent's owner
-  const [githubToken, claudeApiKey, codexApiKey] = await Promise.all([
-    getExternalAuth(agent.userId, 'github'),
-    getExternalAuth(agent.userId, 'claude'),
-    getExternalAuth(agent.userId, 'codex'),
-  ])
+  // GitHub token always comes from user's external auth
+  const githubToken = await getExternalAuth(agent.userId, 'github')
 
   if (!githubToken) {
     console.error(`Credentials API: No GitHub token for user ${agent.userId}`)
     return json({ error: 'GitHub token not configured' }, { status: 500 })
+  }
+
+  let claudeApiKey: string | null
+  let codexApiKey: string | null
+  let figmaApiKey: string | null
+
+  if (isComped) {
+    // Comped users get org API keys from Secret Manager
+    // eslint-disable-next-line no-console
+    console.log(`Credentials API: Using comped API keys for user ${agent.userId}`)
+    try {
+      claudeApiKey = await getCompedClaudeApiKey()
+      codexApiKey = await getCompedCodexApiKey()
+      // For Figma, try comped first, fall back to user's own token
+      figmaApiKey = await getCompedFigmaApiKey() ?? await getExternalAuth(agent.userId, 'figma')
+    }
+    catch (error) {
+      console.error(`Credentials API: Failed to fetch comped API keys:`, error instanceof Error ? error.message : 'Unknown error')
+      return json({ error: 'Failed to fetch organization API keys' }, { status: 500 })
+    }
+  }
+  else {
+    // Regular users use their own API keys
+    const [claude, codex, figma] = await Promise.all([
+      getExternalAuth(agent.userId, 'claude'),
+      getExternalAuth(agent.userId, 'codex'),
+      getExternalAuth(agent.userId, 'figma'),
+    ])
+    claudeApiKey = claude
+    codexApiKey = codex
+    figmaApiKey = figma
   }
 
   if (!claudeApiKey) {
@@ -109,6 +148,7 @@ export async function loader({ request, params }: Route.LoaderArgs) {
     githubToken,
     claudeApiKey,
     codexApiKey: codexApiKey ?? undefined,
+    figmaApiKey: figmaApiKey ?? undefined,
     needsResume: agent.needsResume,
     repoOwner: agent.repoOwner,
     repoName: agent.repoName,

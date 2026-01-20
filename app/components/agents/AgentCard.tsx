@@ -1,11 +1,12 @@
 import {
+  Badge,
   Card,
   Group,
   Stack,
   Text,
   UnstyledButton,
 } from '@mantine/core'
-import { IconBrandGithub, IconCircleDot } from '@tabler/icons-react'
+import { IconBrandGithub, IconCircleDot, IconShare } from '@tabler/icons-react'
 import { useNavigate } from 'react-router'
 import { AgentStatusBadge } from './AgentStatusBadge'
 
@@ -18,6 +19,8 @@ interface AgentCardProps {
   issueNumber?: number
   issueTitle?: string
   createdAt: string
+  ownerGithubLogin?: string
+  isOwned?: boolean
 }
 
 export function AgentCard({
@@ -29,6 +32,8 @@ export function AgentCard({
   issueNumber,
   issueTitle,
   createdAt,
+  ownerGithubLogin,
+  isOwned = true,
 }: AgentCardProps) {
   const navigate = useNavigate()
 
@@ -70,6 +75,17 @@ export function AgentCard({
               <Text fw={500} truncate style={{ flex: 1 }}>
                 {title}
               </Text>
+              {!isOwned && ownerGithubLogin && (
+                <Badge
+                  variant="light"
+                  color="grape"
+                  size="sm"
+                  leftSection={<IconShare size={12} />}
+                >
+                  Shared by @
+                  {ownerGithubLogin}
+                </Badge>
+              )}
             </Group>
 
             <Group gap="md" wrap="wrap">

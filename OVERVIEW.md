@@ -44,6 +44,7 @@ The cookie contains `{ sessionId: string }`. On every protected request, the ses
 - `name?`: Display name
 - `email?`: Email address
 - `avatarUrl`: GitHub avatar URL
+- `isComped?`: True if using organization API keys (set manually)
 - `createdAt`, `updatedAt`, `lastLoginAt`: Timestamps
 
 ### Sessions (`sessions/{sessionId}`)
@@ -53,7 +54,7 @@ The cookie contains `{ sessionId: string }`. On every protected request, the ses
 ### External Auth (`external_auth/{userId}_{toolName}`)
 Stores encrypted API keys for external tools.
 - `userId`: Internal user UUID
-- `toolName`: Tool identifier (`claude`, `codex`, `github`)
+- `toolName`: Tool identifier (`claude`, `codex`, `github`, `figma`)
 - `wrappedDek`: KMS-wrapped Data Encryption Key (Base64)
 - `iv`: AES-GCM initialization vector (Base64)
 - `tag`: AES-GCM auth tag (Base64)
@@ -65,15 +66,18 @@ Stores encrypted API keys for external tools.
 Stores agent records with status and metadata.
 - `id`: UUID
 - `userId`: Internal user UUID
+- `ownerGithubLogin`: Denormalized owner GitHub username (for display)
 - `title`: Display title
 - `status`: State machine status
 - `statusVersion`: Optimistic locking version
+- `sharedWith?`: Array of user UUIDs with access (max 50)
 - `repoOwner`, `repoName`, `branch`: Target repository
 - `issueNumber?`, `issueTitle?`: Optional GitHub issue
 - `instructions?`: User instructions for the agent
 - `startedAt?`, `suspendedAt?`, `stoppedAt?`, `completedAt?`: Timestamps
 - `errorMessage?`: Error details if failed
 - `instanceName?`, `instanceZone?`, `instanceStatus?`: GCE instance info
+- `lastHeartbeatAt?`: Server-updated heartbeat for reaper
 - `createdAt`, `updatedAt`: Timestamps
 
 ## API Key Encryption
@@ -140,7 +144,18 @@ Terminal: completed, failed, cancelled (no transitions out)
 5. **Session validation**: Every protected request validates session against Firestore
 6. **lastSeenAt throttling**: Updates only if older than 5 minutes
 7. **Logout correctness**: Revokes Firestore session FIRST, then destroys cookie
-8. **Agent ownership**: All agent operations verify userId matches
+8. **Agent access control**: All agent operations verify userId matches OR is in sharedWith
+
+### Security Headers
+
+The server applies comprehensive security headers:
+- **Content-Security-Policy** (Report-Only mode for testing)
+- **X-Frame-Options**: DENY (clickjacking protection)
+- **X-Content-Type-Options**: nosniff
+- **Referrer-Policy**: strict-origin-when-cross-origin
+- **Permissions-Policy**: camera/microphone/geolocation/payment disabled
+- **Cross-Origin-Opener-Policy**: same-origin-allow-popups (for OAuth)
+- **HSTS**: max-age=31536000 (production only)
 
 ### Cookie Security
 
@@ -170,6 +185,9 @@ Terminal: completed, failed, cancelled (no transitions out)
 - `github-client-id` - GitHub OAuth App client ID
 - `github-client-secret` - GitHub OAuth App client secret
 - `session-secret` - Session cookie signing secret (min 32 chars)
+- `compedClaudeApiKey` - Org Claude API key for comped users (optional)
+- `compedCodexApiKey` - Org Codex API key for comped users (optional)
+- `compedFigmaApiKey` - Org Figma API key for comped users (optional)
 
 ## Required GCP Resources
 
@@ -186,9 +204,12 @@ Terminal: completed, failed, cancelled (no transitions out)
 
 ### Firestore Indexes
 - `users`: `githubId` ASC (for OAuth lookup)
+- `users`: `githubLogin` ASC (for sharing lookup)
 - `external_auth`: `userId` ASC (for listing configured tools)
 - `agents`: `userId` ASC, `createdAt` DESC (for listing user's agents)
 - `agents`: `userId` ASC, `status` ASC, `updatedAt` DESC (for filtered listing)
+- `agents`: `sharedWith` ARRAY_CONTAINS (for shared agent queries)
+- `agents`: `status` ASC, `lastHeartbeatAt` ASC (for reaper queries)
 
 ## Deployment
 
@@ -283,10 +304,12 @@ Uses systemd services for reliable orchestration:
 4. Claims extracted for service account and instance validation
 
 **Credentials Endpoint** (`/api/agents/:id/credentials`):
-- Returns GitHub token, Claude API key, Codex API key
+- Returns GitHub token, Claude API key, Codex API key, Figma API key
+- For comped users: retrieves org keys from Secret Manager (10-min TTL cache)
 - Validates GCE identity token
 - Verifies agent status is provisioning/running
 - Credentials not cached on VM disk (in-memory only)
+- Returns with `Cache-Control: no-store` header
 
 ## Inactivity Timeout
 
@@ -294,12 +317,19 @@ Uses systemd services for reliable orchestration:
 1. **15 minutes inactive**: Suspend VM (preserves memory, ~30s resume)
 2. **1 hour inactive**: Stop VM (discards memory, ~60s restart)
 
-**Implementation**:
+**Client-side Implementation**:
 - Browser tracks activity (keydown, mouse events)
 - Updates `lastActivity` in Firestore every 30 seconds
 - Shows warnings 2 min before suspend, 5 min before stop
 - Pauses timer when tab is hidden
-- Server backup (future): Cloud Scheduler checks `lastActivity`
+
+**Server-side Reaper** (Cloud Scheduler):
+- Runs periodically via `/api/internal/reaper` endpoint
+- Authenticated via OIDC token from scheduler service account
+- Updates `lastHeartbeatAt` from WebSocket layer (throttled to 1/min)
+- Acquires distributed lock to prevent concurrent runs
+- Processes agents in batches with bounded concurrency (5 parallel)
+- Grace period: 2 minutes after resume before eligible for suspend
 
 **Warning States**:
 - `active`: Normal operation
@@ -364,12 +394,49 @@ New fields in `agents/{agentId}`:
 | `/api/agents/:id/terminal` | WebSocket | Origin + Session | Terminal proxy |
 | `/api/auth/firebase-token` | GET | Session | Get Firebase custom token |
 
-## Non-Goals (Part 2/3)
+## Agent Sharing
+
+Agents can be shared with other users by their GitHub username:
+- Owner adds users via Share modal (lookup by `githubLogin`)
+- `sharedWith` array stores user UUIDs (max 50)
+- Shared users have full access to view/control the agent
+- Only owner can share/unshare and delete
+- "Shared by @username" badge shown in agent list
+
+## Finish Workflow
+
+"Finish" button instructs Claude Code to complete work:
+1. Run Codex code review on all changes
+2. Address critical issues from review
+3. Commit all local changes
+4. Push to new branch
+5. Create pull request
+
+Prompt sent directly to terminal via WebSocket.
+
+## VM MCP Configuration
+
+Bootstrap script generates `~/.claude.json` with MCP servers:
+- **GitHub MCP**: `@modelcontextprotocol/server-github` (always)
+- **Shopify MCP**: `@anthropics/shopify-mcp-server` (always)
+- **Figma MCP**: `figma-mcp-server` (if token provided)
+
+Tokens passed via environment variables, not persisted to disk.
+
+## Comped Users
+
+Users with `isComped: true` use organization API keys:
+- Claude and Codex inputs hidden on settings page
+- Keys fetched from Secret Manager with 10-minute TTL cache
+- Figma token can still be user-provided or org-provided
+- Set manually in Firestore by admin
+
+## Non-Goals (Part 2/3/4)
 
 - Terminal history persistence (ephemeral for MVP)
 - Retry failed agents (future issue)
 - Multi-tab support (single session per agent)
 - GitHub App integration (keep OAuth)
-- Server-side inactivity scheduler (future enhancement)
 - Additional authentication providers
 - User-controlled dark mode toggle
+- CSP enforcement (currently Report-Only)

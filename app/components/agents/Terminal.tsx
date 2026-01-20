@@ -7,7 +7,7 @@
 
 import { Loader, Text } from '@mantine/core'
 import { IconAlertCircle, IconPlugConnected, IconRefresh } from '@tabler/icons-react'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react'
 import './Terminal.css'
 
 // Import xterm.js CSS
@@ -38,9 +38,17 @@ interface TerminalProps {
 }
 
 /**
+ * Imperative handle for Terminal component.
+ */
+export interface TerminalHandle {
+  sendInput: (text: string) => void
+  isConnected: () => boolean
+}
+
+/**
  * Terminal component using xterm.js.
  */
-export function Terminal({ agentId }: TerminalProps) {
+export function Terminal({ ref, agentId }: TerminalProps & { ref?: React.RefObject<TerminalHandle | null> }) {
   const terminalRef = useRef<HTMLDivElement>(null)
   const xtermRef = useRef<import('@xterm/xterm').Terminal | null>(null)
   const fitAddonRef = useRef<import('@xterm/addon-fit').FitAddon | null>(null)
@@ -50,6 +58,17 @@ export function Terminal({ agentId }: TerminalProps) {
 
   const [connectionState, setConnectionState] = useState<ConnectionState>('connecting')
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
+
+  // Expose imperative handle for parent components
+  useImperativeHandle(ref, () => ({
+    sendInput: (text: string) => {
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        const message: WsMessage = { type: 'stdin', data: text }
+        wsRef.current.send(JSON.stringify(message))
+      }
+    },
+    isConnected: () => connectionState === 'connected',
+  }), [connectionState])
 
   /**
    * Initialize xterm.js terminal.

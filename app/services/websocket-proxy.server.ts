@@ -17,7 +17,7 @@ import type WebSocket from 'ws'
 import { Timestamp } from '@google-cloud/firestore'
 import { createCookieSessionStorage } from 'react-router'
 import { WebSocket as WsClient } from 'ws'
-import { getAgent } from '~/models/agent.server'
+import { canAccessAgent, getAgent } from '~/models/agent.server'
 import { getSession as getFirestoreSession } from '~/models/session.server'
 import { getFirestore } from '~/services/firestore.server'
 import { env } from './env.server'
@@ -25,6 +25,12 @@ import { getSecret } from './secrets.server'
 
 // VM terminal port
 const VM_TERMINAL_PORT = 8080
+
+// Heartbeat throttling - max once per 60 seconds
+const HEARTBEAT_THROTTLE_MS = 60_000
+
+// Track last heartbeat update per agent to avoid excessive Firestore writes
+const lastHeartbeatUpdates = new Map<string, number>()
 
 // Allowed origins for WebSocket connections
 function getAllowedOrigins(): string[] {
@@ -174,6 +180,34 @@ async function updateLastActivity(agentId: string): Promise<void> {
 }
 
 /**
+ * Updates the lastHeartbeatAt timestamp for an agent (throttled).
+ * Used by the server-side reaper to track VM activity.
+ *
+ * @param agentId - Agent UUID
+ */
+async function updateHeartbeat(agentId: string): Promise<void> {
+  const now = Date.now()
+  const lastUpdate = lastHeartbeatUpdates.get(agentId) ?? 0
+
+  // Throttle heartbeat updates to max once per minute
+  if (now - lastUpdate < HEARTBEAT_THROTTLE_MS) {
+    return
+  }
+
+  lastHeartbeatUpdates.set(agentId, now)
+
+  try {
+    const db = getFirestore()
+    await db.collection('agents').doc(agentId).update({
+      lastHeartbeatAt: Timestamp.now(),
+    })
+  }
+  catch (error) {
+    console.error('Failed to update lastHeartbeatAt:', error)
+  }
+}
+
+/**
  * Result of WebSocket connection setup.
  */
 export interface ProxyConnectionResult {
@@ -211,7 +245,7 @@ export async function setupProxyConnection(
     return { success: false, error: 'Unauthorized', errorCode: 4001 }
   }
 
-  // 3. Fetch agent and verify ownership
+  // 3. Fetch agent and verify access (owner or shared)
   const agent = await getAgent(agentId)
   if (!agent) {
     console.warn('WebSocket proxy: Agent not found:', agentId)
@@ -219,7 +253,9 @@ export async function setupProxyConnection(
     return { success: false, error: 'Agent not found', errorCode: 4004 }
   }
 
-  if (agent.userId !== userId) {
+  // Check if user can access the agent (owner or shared)
+  const hasAccess = await canAccessAgent(agentId, userId)
+  if (!hasAccess) {
     console.warn('WebSocket proxy: Unauthorized access to agent:', agentId)
     // Use WebSocket close code 4003 (custom code for forbidden) instead of HTTP 403
     return { success: false, error: 'Forbidden', errorCode: 4003 }
@@ -272,6 +308,9 @@ export async function setupProxyConnection(
     if (browserConnected && ws.readyState === ws.OPEN) {
       // Forward message from VM to browser
       ws.send(data.toString())
+
+      // Update server-side heartbeat on any VM output (throttled)
+      updateHeartbeat(agentId)
     }
   })
 
@@ -299,11 +338,12 @@ export async function setupProxyConnection(
       // Forward message from browser to VM
       vmWs.send(data.toString())
 
-      // Update last activity on user input
+      // Update last activity and heartbeat on user input
       try {
         const msg = JSON.parse(data.toString()) as WsMessage
         if (msg.type === 'stdin') {
           updateLastActivity(agentId)
+          updateHeartbeat(agentId)
         }
       }
       catch {

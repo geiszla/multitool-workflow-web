@@ -11,7 +11,7 @@ import { NewAgentForm } from '~/components/agents/NewAgentForm'
 import {
   createAgent,
   isActiveStatus,
-  listUserAgents,
+  listAccessibleAgents,
   updateAgentStatus,
 } from '~/models/agent.server'
 import { getExternalAuth, hasExternalAuth } from '~/models/external-auth.server'
@@ -41,20 +41,22 @@ interface LoaderData {
     issueNumber?: number
     issueTitle?: string
     createdAt: string
+    ownerGithubLogin: string
+    isOwned: boolean
   }>
-  nextCursor?: string
   claudeConfigured: boolean
   hasActiveAgents: boolean
+  currentUserId: string
 }
 
 export async function loader({ request }: Route.LoaderArgs): Promise<LoaderData> {
   const user = await requireUser(request)
 
   // Load repos, agents, and check Claude config in parallel
-  const [githubToken, claudeConfigured, agentsResult] = await Promise.all([
+  const [githubToken, claudeConfigured, agents] = await Promise.all([
     getExternalAuth(user.id, 'github'),
     hasExternalAuth(user.id, 'claude'),
-    listUserAgents(user.id, { limit: 10 }),
+    listAccessibleAgents(user.id),
   ])
 
   // Load repos if GitHub token is available
@@ -69,11 +71,11 @@ export async function loader({ request }: Route.LoaderArgs): Promise<LoaderData>
   }
 
   // Check if any agents are active (need polling)
-  const hasActiveAgents = agentsResult.agents.some(agent => isActiveStatus(agent.status))
+  const hasActiveAgents = agents.some(agent => isActiveStatus(agent.status))
 
   return {
     repos,
-    agents: agentsResult.agents.map(agent => ({
+    agents: agents.map(agent => ({
       id: agent.id,
       title: agent.title,
       status: agent.status,
@@ -82,10 +84,12 @@ export async function loader({ request }: Route.LoaderArgs): Promise<LoaderData>
       issueNumber: agent.issueNumber,
       issueTitle: agent.issueTitle,
       createdAt: agent.createdAt.toDate().toISOString(),
+      ownerGithubLogin: agent.ownerGithubLogin,
+      isOwned: agent.userId === user.id,
     })),
-    nextCursor: agentsResult.nextCursor,
     claudeConfigured,
     hasActiveAgents,
+    currentUserId: user.id,
   }
 }
 
@@ -163,6 +167,7 @@ export async function action({ request }: Route.ActionArgs): Promise<ActionData>
     try {
       const agent = await createAgent({
         userId: user.id,
+        ownerGithubLogin: user.githubLogin,
         title: title || undefined,
         repoOwner,
         repoName,
@@ -253,6 +258,8 @@ export default function Agents() {
                     issueNumber={agent.issueNumber}
                     issueTitle={agent.issueTitle}
                     createdAt={agent.createdAt}
+                    ownerGithubLogin={agent.ownerGithubLogin}
+                    isOwned={agent.isOwned}
                   />
                 ))}
               </Stack>

@@ -21,6 +21,7 @@ export interface User {
   name?: string
   email?: string
   avatarUrl: string
+  isComped?: boolean // True if using organization API keys (set manually in Firestore)
   createdAt: Timestamp
   updatedAt: Timestamp
   lastLoginAt: Timestamp
@@ -174,4 +175,27 @@ export async function getUserByGitHubLogin(
   }
 
   return snapshot.docs[0].data() as User
+}
+
+/**
+ * Gets multiple users by their IDs.
+ * Batches lookups efficiently.
+ *
+ * @param userIds - Array of user UUIDs
+ * @returns Array of users (order may not match input)
+ */
+export async function getUsersByIds(
+  userIds: string[],
+): Promise<User[]> {
+  if (userIds.length === 0) {
+    return []
+  }
+
+  const db = getFirestore()
+  const refs = userIds.map(id => db.collection(USERS_COLLECTION).doc(id))
+  const docs = await db.getAll(...refs)
+
+  return docs
+    .filter(doc => doc.exists)
+    .map(doc => doc.data() as User)
 }

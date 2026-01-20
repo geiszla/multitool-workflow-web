@@ -22,7 +22,7 @@ import {
 /**
  * Supported external tools.
  */
-export type ToolName = 'claude' | 'codex' | 'github'
+export type ToolName = 'claude' | 'codex' | 'github' | 'figma'
 
 /**
  * External auth document structure in Firestore.

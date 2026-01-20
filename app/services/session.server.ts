@@ -33,6 +33,7 @@ export interface SessionUser {
   name?: string
   avatarUrl: string
   email?: string
+  isComped?: boolean // True if using organization API keys
 }
 
 // Session data structure
@@ -164,6 +165,7 @@ export async function getSessionUser(
       name: user.name,
       avatarUrl: user.avatarUrl,
       email: user.email,
+      isComped: user.isComped,
     }
   }
   catch (error) {
@@ -229,6 +231,7 @@ export async function requireUser(request: Request): Promise<SessionUser> {
       name: user.name,
       avatarUrl: user.avatarUrl,
       email: user.email,
+      isComped: user.isComped,
     }
   }
   catch (error) {

@@ -7,6 +7,7 @@ import {
   Title,
 } from '@mantine/core'
 import {
+  IconBrandFigma,
   IconInfoCircle,
   IconRobot,
   IconSparkles,
@@ -33,29 +34,35 @@ interface LoaderData {
   tools: {
     claude: { configured: boolean, suffix: string | null }
     codex: { configured: boolean, suffix: string | null }
+    figma: { configured: boolean, suffix: string | null }
   }
+  isComped: boolean
 }
 
 export async function loader({ request }: Route.LoaderArgs): Promise<LoaderData> {
   const user = await requireUser(request)
 
   // Check which tools are configured
-  const [claudeConfigured, codexConfigured] = await Promise.all([
+  const [claudeConfigured, codexConfigured, figmaConfigured] = await Promise.all([
     hasExternalAuth(user.id, 'claude'),
     hasExternalAuth(user.id, 'codex'),
+    hasExternalAuth(user.id, 'figma'),
   ])
 
   // Get suffixes for configured tools
-  const [claudeSuffix, codexSuffix] = await Promise.all([
+  const [claudeSuffix, codexSuffix, figmaSuffix] = await Promise.all([
     claudeConfigured ? getExternalAuthSuffix(user.id, 'claude') : null,
     codexConfigured ? getExternalAuthSuffix(user.id, 'codex') : null,
+    figmaConfigured ? getExternalAuthSuffix(user.id, 'figma') : null,
   ])
 
   return {
     tools: {
       claude: { configured: claudeConfigured, suffix: claudeSuffix },
       codex: { configured: codexConfigured, suffix: codexSuffix },
+      figma: { configured: figmaConfigured, suffix: figmaSuffix },
     },
+    isComped: user.isComped ?? false,
   }
 }
 
@@ -73,7 +80,7 @@ export async function action({ request }: Route.ActionArgs): Promise<ActionData>
   const intent = formData.get('intent')
   const toolName = formData.get('toolName') as ToolName
 
-  if (!toolName || !['claude', 'codex'].includes(toolName)) {
+  if (!toolName || !['claude', 'codex', 'figma'].includes(toolName)) {
     return { error: 'Invalid tool name' }
   }
 
@@ -101,7 +108,7 @@ export async function action({ request }: Route.ActionArgs): Promise<ActionData>
 }
 
 export default function Settings() {
-  const { tools } = useLoaderData<LoaderData>()
+  const { tools, isComped } = useLoaderData<LoaderData>()
   const fetcher = useFetcher<ActionData>()
 
   const isLoading = fetcher.state !== 'idle'
@@ -142,41 +149,75 @@ export default function Settings() {
       )}
 
       <Stack gap="md">
-        {/* Claude API */}
-        <ExternalToolCard
-          title="Claude API"
-          description="Anthropic's Claude API for code generation and analysis"
-          icon={<IconSparkles size={20} />}
-          isConfigured={tools.claude.configured}
-        >
-          <ApiKeyInput
-            toolName="claude"
-            label="Claude API Key"
-            placeholder="sk-ant-..."
-            isConfigured={tools.claude.configured}
-            keySuffix={tools.claude.suffix}
-            isLoading={isLoading && loadingTool === 'claude'}
-            onSave={key => handleSave('claude', key)}
-            onDelete={() => handleDelete('claude')}
-          />
-        </ExternalToolCard>
+        {/* Comped users notice */}
+        {isComped && (
+          <Alert
+            icon={<IconInfoCircle size={16} />}
+            title="Organization API Keys"
+            color="blue"
+          >
+            You are using organization-provided Claude and Codex API keys. These are managed by your administrator.
+          </Alert>
+        )}
 
-        {/* Codex API */}
+        {/* Claude API - hidden for comped users */}
+        {!isComped && (
+          <ExternalToolCard
+            title="Claude API"
+            description="Anthropic's Claude API for code generation and analysis"
+            icon={<IconSparkles size={20} />}
+            isConfigured={tools.claude.configured}
+          >
+            <ApiKeyInput
+              toolName="claude"
+              label="Claude API Key"
+              placeholder="sk-ant-..."
+              isConfigured={tools.claude.configured}
+              keySuffix={tools.claude.suffix}
+              isLoading={isLoading && loadingTool === 'claude'}
+              onSave={key => handleSave('claude', key)}
+              onDelete={() => handleDelete('claude')}
+            />
+          </ExternalToolCard>
+        )}
+
+        {/* Codex API - hidden for comped users */}
+        {!isComped && (
+          <ExternalToolCard
+            title="Codex"
+            description="OpenAI Codex API for code completion and generation"
+            icon={<IconRobot size={20} />}
+            isConfigured={tools.codex.configured}
+          >
+            <ApiKeyInput
+              toolName="codex"
+              label="Codex API Key"
+              placeholder="sk-..."
+              isConfigured={tools.codex.configured}
+              keySuffix={tools.codex.suffix}
+              isLoading={isLoading && loadingTool === 'codex'}
+              onSave={key => handleSave('codex', key)}
+              onDelete={() => handleDelete('codex')}
+            />
+          </ExternalToolCard>
+        )}
+
+        {/* Figma API - always shown (optional tool) */}
         <ExternalToolCard
-          title="Codex"
-          description="OpenAI Codex API for code completion and generation"
-          icon={<IconRobot size={20} />}
-          isConfigured={tools.codex.configured}
+          title="Figma"
+          description="Access token for Figma MCP server (optional)"
+          icon={<IconBrandFigma size={20} />}
+          isConfigured={tools.figma.configured}
         >
           <ApiKeyInput
-            toolName="codex"
-            label="Codex API Key"
-            placeholder="sk-..."
-            isConfigured={tools.codex.configured}
-            keySuffix={tools.codex.suffix}
-            isLoading={isLoading && loadingTool === 'codex'}
-            onSave={key => handleSave('codex', key)}
-            onDelete={() => handleDelete('codex')}
+            toolName="figma"
+            label="Figma Access Token"
+            placeholder="figd_..."
+            isConfigured={tools.figma.configured}
+            keySuffix={tools.figma.suffix}
+            isLoading={isLoading && loadingTool === 'figma'}
+            onSave={key => handleSave('figma', key)}
+            onDelete={() => handleDelete('figma')}
           />
         </ExternalToolCard>
       </Stack>

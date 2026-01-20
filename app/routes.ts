@@ -20,6 +20,10 @@ export default [
   route('api/agents/:id/activity', 'routes/api.agents.$id.activity.tsx'),
   route('api/auth/firebase-token', 'routes/api.auth.firebase-token.tsx'),
 
+  // Internal API routes (for Cloud Scheduler and CSP reporting)
+  route('api/internal/reaper', 'routes/api.internal.reaper.tsx'),
+  route('api/internal/csp-report', 'routes/api.internal.csp-report.tsx'),
+
   // Authenticated app routes
   layout('routes/_app.tsx', [
     route('agents', 'routes/_app.agents.tsx'),

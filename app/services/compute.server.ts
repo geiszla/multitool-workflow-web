@@ -441,7 +441,9 @@ EOF
 chmod 600 /etc/default/agent-env
 
 # Create environment file for pty-server (API keys will be added by bootstrap)
+# Note: Must be writable by agent user since bootstrap runs as agent
 touch /etc/default/pty-server
+chown agent:agent /etc/default/pty-server
 chmod 600 /etc/default/pty-server
 
 # Install Node.js 24 LTS
@@ -713,7 +715,7 @@ esac
 }
 
 function configureClaudeCode(credentials) {
-  const { claudeApiKey, codexApiKey } = credentials
+  const { claudeApiKey, codexApiKey, figmaApiKey, githubToken } = credentials
 
   // Append API keys to pty-server env file
   appendFileSync('/etc/default/pty-server', \\\`ANTHROPIC_API_KEY=\\\${claudeApiKey}\\n\\\`)
@@ -721,7 +723,43 @@ function configureClaudeCode(credentials) {
     appendFileSync('/etc/default/pty-server', \\\`OPENAI_API_KEY=\\\${codexApiKey}\\n\\\`)
   }
 
-  log('info', 'Claude Code configured')
+  // Build MCP config for Claude (goes in ~/.claude.json)
+  const mcpServers = {
+    github: {
+      command: 'npx',
+      args: ['-y', '@modelcontextprotocol/server-github'],
+      env: {
+        GITHUB_PERSONAL_ACCESS_TOKEN: githubToken,
+      },
+    },
+    shopify: {
+      command: 'npx',
+      args: ['-y', '@anthropics/shopify-mcp-server'],
+      env: {},
+    },
+  }
+
+  // Add Figma MCP server only if token is provided
+  if (figmaApiKey) {
+    mcpServers.figma = {
+      command: 'npx',
+      args: ['-y', 'figma-mcp-server'],
+      env: {
+        FIGMA_ACCESS_TOKEN: figmaApiKey,
+      },
+    }
+  }
+
+  const claudeConfig = { mcpServers }
+
+  // Write Claude config to user's home directory
+  const claudeConfigPath = join(homedir(), '.claude.json')
+  writeFileSync(claudeConfigPath, JSON.stringify(claudeConfig, null, 2), { mode: 0o600 })
+
+  log('info', 'Claude Code configured with MCP servers', {
+    servers: Object.keys(mcpServers),
+    hasFigma: !!figmaApiKey,
+  })
 }
 
 // NOTE: internalIp is NOT sent to status endpoint for security

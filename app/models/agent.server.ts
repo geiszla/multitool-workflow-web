@@ -43,9 +43,13 @@ const VALID_TRANSITIONS: Record<AgentStatus, AgentStatus[]> = {
 export interface Agent {
   id: string // UUID
   userId: string // Internal user UUID
+  ownerGithubLogin: string // Denormalized for display (avoid N+1 lookups)
   title: string // User-provided or auto-generated title
   status: AgentStatus
   statusVersion: number // Incremented on each status change (optimistic locking)
+
+  // Sharing
+  sharedWith?: string[] // Array of internal user UUIDs
 
   // Target configuration
   repoOwner: string // GitHub org/user
@@ -85,6 +89,9 @@ export interface Agent {
   // Provisioning tracking
   provisioningOperationId?: string // GCE operation ID for polling
 
+  // Server-side heartbeat for reaper
+  lastHeartbeatAt?: Timestamp // Server-updated from WebSocket layer
+
   // Timestamps
   createdAt: Timestamp
   updatedAt: Timestamp
@@ -95,6 +102,7 @@ export interface Agent {
  */
 export interface CreateAgentInput {
   userId: string
+  ownerGithubLogin: string // Denormalized for display
   title?: string
   repoOwner: string
   repoName: string
@@ -164,6 +172,7 @@ export async function createAgent(input: CreateAgentInput): Promise<Agent> {
   const agent: Agent = {
     id: agentId,
     userId: input.userId,
+    ownerGithubLogin: input.ownerGithubLogin,
     title: input.title || generateTitle(input.repoOwner, input.repoName, input.issueNumber),
     status: 'pending',
     statusVersion: 1,
@@ -339,6 +348,8 @@ export async function updateAgentStatus(
         if (fromStatus === 'provisioning') {
           updates.startedAt = now
         }
+        // Initialize lastHeartbeatAt for the reaper to track activity
+        updates.lastHeartbeatAt = now
         break
       case 'suspended':
         updates.suspendedAt = now
@@ -429,4 +440,205 @@ export async function updateAgentActivity(agentId: string): Promise<void> {
 export async function deleteAgent(agentId: string): Promise<void> {
   const db = getFirestore()
   await db.collection(AGENTS_COLLECTION).doc(agentId).delete()
+}
+
+// =============================================================================
+// Sharing Functions
+// =============================================================================
+
+const MAX_SHARES = 50 // Prevent document bloat
+
+/**
+ * Checks if a user can access an agent (owner or shared with).
+ *
+ * @param agentId - Agent UUID
+ * @param userId - User UUID to check
+ * @returns True if user can access the agent
+ */
+export async function canAccessAgent(agentId: string, userId: string): Promise<boolean> {
+  const agent = await getAgent(agentId)
+  if (!agent) {
+    return false
+  }
+  return agent.userId === userId || (agent.sharedWith?.includes(userId) ?? false)
+}
+
+/**
+ * Checks if a user is the owner of an agent.
+ *
+ * @param agent - Agent object
+ * @param userId - User UUID to check
+ * @returns True if user is the owner
+ */
+export function isAgentOwner(agent: Agent, userId: string): boolean {
+  return agent.userId === userId
+}
+
+/**
+ * Gets an agent with access verification.
+ * Unlike getAgentForUser (owner only), this allows shared users too.
+ *
+ * @param agentId - Agent UUID
+ * @param userId - User UUID to verify access
+ * @returns Agent
+ * @throws Error if not found or unauthorized
+ */
+export async function getAgentWithAccess(agentId: string, userId: string): Promise<Agent> {
+  const agent = await getAgent(agentId)
+
+  if (!agent) {
+    const error = new Error('Agent not found')
+    ;(error as Error & { status: number }).status = 404
+    throw error
+  }
+
+  if (!isAgentOwner(agent, userId) && !agent.sharedWith?.includes(userId)) {
+    const error = new Error('Unauthorized: Cannot access agent')
+    ;(error as Error & { status: number }).status = 403
+    throw error
+  }
+
+  return agent
+}
+
+/**
+ * Shares an agent with another user by their GitHub login.
+ *
+ * @param agentId - Agent UUID
+ * @param ownerUserId - Owner's user UUID (for verification)
+ * @param shareWithGithubLogin - GitHub login of user to share with
+ * @throws Error if validation fails
+ */
+export async function shareAgent(
+  agentId: string,
+  ownerUserId: string,
+  shareWithGithubLogin: string,
+): Promise<void> {
+  // Import here to avoid circular dependency
+  const { getUserByGitHubLogin } = await import('~/models/user.server')
+  const { FieldValue } = await import('@google-cloud/firestore')
+
+  const db = getFirestore()
+
+  await db.runTransaction(async (tx) => {
+    const agentRef = db.collection(AGENTS_COLLECTION).doc(agentId)
+    const agentDoc = await tx.get(agentRef)
+
+    if (!agentDoc.exists) {
+      throw new Error('Agent not found')
+    }
+
+    const agent = agentDoc.data() as Agent
+
+    // Validate owner
+    if (agent.userId !== ownerUserId) {
+      throw new Error('Only the owner can share this agent')
+    }
+
+    // Look up user by GitHub login
+    const userToShare = await getUserByGitHubLogin(shareWithGithubLogin)
+    if (!userToShare) {
+      throw new Error('User not found. They must log in at least once.')
+    }
+
+    // Prevent sharing with self
+    if (userToShare.id === ownerUserId) {
+      throw new Error('Cannot share with yourself')
+    }
+
+    // Check max shares
+    const currentShares = agent.sharedWith?.length ?? 0
+    if (currentShares >= MAX_SHARES) {
+      throw new Error(`Maximum ${MAX_SHARES} shares reached`)
+    }
+
+    // Check if already shared
+    if (agent.sharedWith?.includes(userToShare.id)) {
+      throw new Error('Already shared with this user')
+    }
+
+    // Update array
+    tx.update(agentRef, {
+      sharedWith: FieldValue.arrayUnion(userToShare.id),
+      updatedAt: Timestamp.now(),
+    })
+  })
+}
+
+/**
+ * Removes sharing access from a user.
+ *
+ * @param agentId - Agent UUID
+ * @param ownerUserId - Owner's user UUID (for verification)
+ * @param unshareUserId - User UUID to remove
+ * @throws Error if validation fails
+ */
+export async function unshareAgent(
+  agentId: string,
+  ownerUserId: string,
+  unshareUserId: string,
+): Promise<void> {
+  const { FieldValue } = await import('@google-cloud/firestore')
+  const db = getFirestore()
+
+  await db.runTransaction(async (tx) => {
+    const agentRef = db.collection(AGENTS_COLLECTION).doc(agentId)
+    const agentDoc = await tx.get(agentRef)
+
+    if (!agentDoc.exists) {
+      throw new Error('Agent not found')
+    }
+
+    const agent = agentDoc.data() as Agent
+
+    if (agent.userId !== ownerUserId) {
+      throw new Error('Only the owner can unshare')
+    }
+
+    tx.update(agentRef, {
+      sharedWith: FieldValue.arrayRemove(unshareUserId),
+      updatedAt: Timestamp.now(),
+    })
+  })
+}
+
+/**
+ * Lists all agents a user can access (owned + shared).
+ * Sorted by updatedAt descending.
+ *
+ * @param userId - User UUID
+ * @returns List of agents
+ */
+export async function listAccessibleAgents(userId: string): Promise<Agent[]> {
+  const db = getFirestore()
+
+  // Query both owned and shared agents
+  const [ownedSnap, sharedSnap] = await Promise.all([
+    db.collection(AGENTS_COLLECTION)
+      .where('userId', '==', userId)
+      .get(),
+    db.collection(AGENTS_COLLECTION)
+      .where('sharedWith', 'array-contains', userId)
+      .get(),
+  ])
+
+  const agents = [
+    ...ownedSnap.docs.map(d => ({ ...d.data() as Agent, id: d.id })),
+    ...sharedSnap.docs.map(d => ({ ...d.data() as Agent, id: d.id })),
+  ]
+
+  // Sort by updatedAt descending
+  return agents.sort((a, b) => b.updatedAt.toMillis() - a.updatedAt.toMillis())
+}
+
+/**
+ * Gets users who have access to an agent.
+ * Returns list of user IDs that the agent is shared with.
+ *
+ * @param agentId - Agent UUID
+ * @returns Array of user UUIDs
+ */
+export async function getAgentSharedWith(agentId: string): Promise<string[]> {
+  const agent = await getAgent(agentId)
+  return agent?.sharedWith ?? []
 }

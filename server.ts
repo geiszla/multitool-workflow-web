@@ -8,6 +8,8 @@
  * while all other requests are handled by React Router.
  */
 
+import type { IncomingMessage, ServerResponse } from 'node:http'
+import crypto from 'node:crypto'
 import { createServer } from 'node:http'
 import { createRequestListener } from '@react-router/node'
 import { WebSocketServer } from 'ws'
@@ -20,9 +22,63 @@ const requestHandler = createRequestListener({
 })
 
 const PORT = Number(process.env.PORT) || 3000
+const isProd = process.env.NODE_ENV === 'production'
+const appOrigin = process.env.APP_URL || 'http://localhost:3000'
+
+/**
+ * Generates a cryptographic nonce for CSP.
+ */
+function generateNonce(): string {
+  return crypto.randomBytes(16).toString('base64')
+}
+
+/**
+ * Applies security headers to the response.
+ */
+function applySecurityHeaders(res: ServerResponse, nonce: string): void {
+  const cspDirectives = [
+    'default-src \'self\'',
+    'base-uri \'self\'',
+    'frame-ancestors \'none\'',
+    'form-action \'self\'',
+    'object-src \'none\'',
+    `script-src 'self' 'nonce-${nonce}'${isProd ? '' : ' \'unsafe-eval\''}`, // unsafe-eval for Vite HMR
+    'style-src \'self\' \'unsafe-inline\'', // Mantine CSS-in-JS requires this
+    'img-src \'self\' data: https://avatars.githubusercontent.com',
+    `connect-src 'self' ${appOrigin} ${appOrigin.replace('https://', 'wss://').replace('http://', 'ws://')} https://*.firebaseio.com wss://*.firebaseio.com https://*.googleapis.com`,
+    `report-uri ${appOrigin}/api/internal/csp-report`,
+  ].join('; ')
+
+  // Report-Only mode for testing (switch to enforcing after validation)
+  res.setHeader('Content-Security-Policy-Report-Only', cspDirectives)
+
+  // Other security headers
+  res.setHeader('X-Frame-Options', 'DENY')
+  res.setHeader('X-Content-Type-Options', 'nosniff')
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin')
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=()')
+
+  // OAuth popups need allow-popups for GitHub auth flow
+  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin-allow-popups')
+
+  // HSTS only in production
+  if (isProd) {
+    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains')
+  }
+}
 
 // Create HTTP server
-const server = createServer(async (req, res) => {
+const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+  // Generate nonce for this request
+  const nonce = generateNonce()
+
+  // Apply security headers
+  applySecurityHeaders(res, nonce)
+
+  // Store nonce for potential use by React Router (if needed in future)
+  // @ts-expect-error - Adding custom property for nonce
+  res.locals = { cspNonce: nonce }
+
   try {
     // Handle HTTP requests through React Router
     await requestHandler(req, res)

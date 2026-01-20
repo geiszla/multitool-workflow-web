@@ -10,7 +10,7 @@
  */
 
 import type { Route } from './+types/api.agents.$id.activity'
-import { getAgentForUser, updateAgentActivity } from '~/models/agent.server'
+import { getAgentWithAccess, updateAgentActivity } from '~/models/agent.server'
 import { requireUser } from '~/services/session.server'
 
 /**
@@ -40,8 +40,8 @@ export async function action({ request, params }: Route.ActionArgs) {
   }
 
   try {
-    // Verify user owns the agent
-    const agent = await getAgentForUser(agentId, user.id)
+    // Verify user can access the agent (owner or shared)
+    const agent = await getAgentWithAccess(agentId, user.id)
 
     // Only update activity for running agents
     if (agent.status !== 'running') {

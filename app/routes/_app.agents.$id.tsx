@@ -1,5 +1,7 @@
 import type { Route } from './+types/_app.agents.$id'
+import type { TerminalHandle } from '~/components/agents/Terminal'
 import type { AgentStatus } from '~/models/agent.server'
+import type { User } from '~/models/user.server'
 import {
   Alert,
   Anchor,
@@ -17,27 +19,36 @@ import {
   IconAlertCircle,
   IconArrowLeft,
   IconBrandGithub,
+  IconCheck,
   IconGitBranch,
   IconPlayerPause,
   IconPlayerPlay,
   IconPlayerStop,
+  IconShare,
   IconTerminal2,
   IconTrash,
   IconX,
 } from '@tabler/icons-react'
-import { useCallback, useState } from 'react'
+import { useCallback, useRef, useState } from 'react'
 import { redirect, useFetcher, useLoaderData, useNavigate } from 'react-router'
 import { AgentStatusBadge } from '~/components/agents/AgentStatusBadge'
+import { FinishModal } from '~/components/agents/FinishModal'
 import { InactivityManager } from '~/components/agents/InactivityManager'
+import { ShareModal } from '~/components/agents/ShareModal'
 import { Terminal } from '~/components/agents/Terminal'
 import { useAgentRealtime } from '~/hooks/useAgentRealtime'
 import {
   deleteAgent,
-  getAgentForUser,
+  getAgentSharedWith,
+  getAgentWithAccess,
   getValidTransitions,
   isActiveStatus,
+  isAgentOwner,
+  shareAgent,
+  unshareAgent,
   updateAgentStatus,
 } from '~/models/agent.server'
+import { getUsersByIds } from '~/models/user.server'
 import {
   deleteInstance,
   resumeInstance,
@@ -79,9 +90,12 @@ interface LoaderData {
     cloneStatus?: string
     cloneError?: string
     needsResume?: boolean
+    ownerGithubLogin: string
   }
   validActions: AgentStatus[]
   isActive: boolean
+  isOwner: boolean
+  sharedUsers: Array<Pick<User, 'id' | 'githubLogin' | 'avatarUrl'>>
 }
 
 export async function loader({ request, params }: Route.LoaderArgs): Promise<LoaderData> {
@@ -93,7 +107,20 @@ export async function loader({ request, params }: Route.LoaderArgs): Promise<Loa
   }
 
   try {
-    const agent = await getAgentForUser(agentId, user.id)
+    // Use getAgentWithAccess to support shared agents
+    const agent = await getAgentWithAccess(agentId, user.id)
+    const isOwner = isAgentOwner(agent, user.id)
+
+    // Get shared users if owner
+    let sharedUsers: Array<Pick<User, 'id' | 'githubLogin' | 'avatarUrl'>> = []
+    if (isOwner && agent.sharedWith && agent.sharedWith.length > 0) {
+      const users = await getUsersByIds(agent.sharedWith)
+      sharedUsers = users.map(u => ({
+        id: u.id,
+        githubLogin: u.githubLogin,
+        avatarUrl: u.avatarUrl,
+      }))
+    }
 
     return {
       agent: {
@@ -119,9 +146,12 @@ export async function loader({ request, params }: Route.LoaderArgs): Promise<Loa
         cloneStatus: agent.cloneStatus,
         cloneError: agent.cloneError,
         needsResume: agent.needsResume,
+        ownerGithubLogin: agent.ownerGithubLogin,
       },
       validActions: getValidTransitions(agent.status),
       isActive: isActiveStatus(agent.status),
+      isOwner,
+      sharedUsers,
     }
   }
   catch (error) {
@@ -137,6 +167,7 @@ interface ActionData {
   success?: boolean
   error?: string
   deleted?: boolean
+  sharedUsers?: Array<Pick<User, 'id' | 'githubLogin' | 'avatarUrl'>>
 }
 
 export async function action({ request, params }: Route.ActionArgs): Promise<ActionData | Response> {
@@ -150,11 +181,76 @@ export async function action({ request, params }: Route.ActionArgs): Promise<Act
   }
 
   try {
-    const agent = await getAgentForUser(agentId, user.id)
+    // Use getAgentWithAccess to support shared users
+    const agent = await getAgentWithAccess(agentId, user.id)
+    const isOwner = isAgentOwner(agent, user.id)
     const validTransitions = getValidTransitions(agent.status)
 
-    // Handle delete action
+    // Handle sharing actions (owner only)
+    if (intent === 'share') {
+      if (!isOwner) {
+        return { error: 'Only the owner can share this agent' }
+      }
+
+      const githubLogin = formData.get('githubLogin') as string
+      if (!githubLogin) {
+        return { error: 'GitHub username is required' }
+      }
+
+      try {
+        await shareAgent(agentId, user.id, githubLogin.trim())
+
+        // Return updated shared users list
+        const sharedWith = await getAgentSharedWith(agentId)
+        const users = await getUsersByIds(sharedWith)
+        const sharedUsers = users.map(u => ({
+          id: u.id,
+          githubLogin: u.githubLogin,
+          avatarUrl: u.avatarUrl,
+        }))
+
+        return { success: true, sharedUsers }
+      }
+      catch (error) {
+        return { error: error instanceof Error ? error.message : 'Failed to share agent' }
+      }
+    }
+
+    if (intent === 'unshare') {
+      if (!isOwner) {
+        return { error: 'Only the owner can unshare this agent' }
+      }
+
+      const unshareUserId = formData.get('unshareUserId') as string
+      if (!unshareUserId) {
+        return { error: 'User ID is required' }
+      }
+
+      try {
+        await unshareAgent(agentId, user.id, unshareUserId)
+
+        // Return updated shared users list
+        const sharedWith = await getAgentSharedWith(agentId)
+        const users = await getUsersByIds(sharedWith)
+        const sharedUsers = users.map(u => ({
+          id: u.id,
+          githubLogin: u.githubLogin,
+          avatarUrl: u.avatarUrl,
+        }))
+
+        return { success: true, sharedUsers }
+      }
+      catch (error) {
+        return { error: error instanceof Error ? error.message : 'Failed to unshare agent' }
+      }
+    }
+
+    // Handle delete action (owner only)
     if (intent === 'delete') {
+      if (!isOwner) {
+        return { error: 'Only the owner can delete this agent' }
+      }
+
       // Delete VM if it exists
       if (agent.instanceName && agent.instanceZone) {
         try {
@@ -228,11 +324,30 @@ export async function action({ request, params }: Route.ActionArgs): Promise<Act
   }
 }
 
+// Prompt sent to Claude Code to finish work
+const FINISH_PROMPT = `Please complete your work and prepare a pull request:
+
+1. Run a Codex code review on all your changes using the /review-pr skill or manually if needed
+2. Address any critical issues from the review
+3. Commit all local changes with a descriptive commit message
+4. Push to a new branch (use a descriptive branch name based on the work done)
+5. Create a pull request with a summary of the changes
+
+Please proceed autonomously and let me know when you're done or if you encounter any issues.`
+
 export default function AgentView() {
   const loaderData = useLoaderData<LoaderData>()
   const navigate = useNavigate()
   const fetcher = useFetcher<ActionData>()
+  const terminalRef = useRef<TerminalHandle>(null)
   const [deleteModalOpen, setDeleteModalOpen] = useState(false)
+  const [shareModalOpen, setShareModalOpen] = useState(false)
+  const [finishModalOpen, setFinishModalOpen] = useState(false)
+  const [finishError, setFinishError] = useState<string | undefined>()
+
+  const { isOwner, sharedUsers: loaderSharedUsers } = loaderData
+  // Use fetcher data if available (after share/unshare action)
+  const sharedUsers = fetcher.data?.sharedUsers ?? loaderSharedUsers
 
   // Use realtime data if available, fall back to loader data
   const { agent: realtimeAgent } = useAgentRealtime(loaderData.agent.id)
@@ -271,6 +386,24 @@ export default function AgentView() {
     fetcher.submit({ intent: 'delete' }, { method: 'post' })
   }
 
+  const handleFinish = () => {
+    if (!terminalRef.current) {
+      setFinishError('Terminal is not connected')
+      return
+    }
+
+    if (!terminalRef.current.isConnected()) {
+      setFinishError('Terminal is not connected')
+      return
+    }
+
+    // Send the finish prompt to the terminal
+    // Add newline to execute the prompt
+    terminalRef.current.sendInput(`${FINISH_PROMPT}\n`)
+    setFinishModalOpen(false)
+    setFinishError(undefined)
+  }
+
   // Handlers for inactivity manager
   const handleInactivitySuspend = useCallback(async () => {
     fetcher.submit({ intent: 'suspend' }, { method: 'post' })
@@ -286,7 +419,9 @@ export default function AgentView() {
   const canStop = validActions.includes('stopped')
   const canResume = agent.status === 'suspended' && validActions.includes('running')
   const canStart = agent.status === 'stopped' && validActions.includes('running')
-  const canDelete = ['completed', 'failed', 'cancelled', 'stopped'].includes(agent.status)
+  const canDelete = isOwner && ['completed', 'failed', 'cancelled', 'stopped'].includes(agent.status)
+  const canShare = isOwner
+  const canFinish = isOwner && agent.status === 'running' && agent.terminalReady
 
   // Terminal visibility conditions
   const showTerminal = agent.status === 'running' && agent.terminalReady
@@ -431,6 +566,28 @@ export default function AgentView() {
                 </Button>
               )}
 
+              {canFinish && (
+                <Button
+                  variant="light"
+                  color="green"
+                  leftSection={<IconCheck size={16} />}
+                  onClick={() => setFinishModalOpen(true)}
+                >
+                  Finish
+                </Button>
+              )}
+
+              {canShare && (
+                <Button
+                  variant="light"
+                  color="grape"
+                  leftSection={<IconShare size={16} />}
+                  onClick={() => setShareModalOpen(true)}
+                >
+                  Share
+                </Button>
+              )}
+
               {canDelete && (
                 <Button
                   variant="light"
@@ -480,7 +637,7 @@ export default function AgentView() {
               onSuspend={handleInactivitySuspend}
               onStop={handleInactivityStop}
             >
-              <Terminal agentId={agent.id} />
+              <Terminal ref={terminalRef} agentId={agent.id} />
             </InactivityManager>
           </div>
         )}
@@ -711,6 +868,27 @@ export default function AgentView() {
           </Group>
         </Stack>
       </Modal>
+
+      {/* Share Modal */}
+      <ShareModal
+        opened={shareModalOpen}
+        onClose={() => setShareModalOpen(false)}
+        agentId={agent.id}
+        agentTitle={agent.title}
+        sharedUsers={sharedUsers}
+      />
+
+      {/* Finish Modal */}
+      <FinishModal
+        opened={finishModalOpen}
+        onClose={() => {
+          setFinishModalOpen(false)
+          setFinishError(undefined)
+        }}
+        onConfirm={handleFinish}
+        isLoading={false}
+        error={finishError}
+      />
     </Stack>
   )
 }
