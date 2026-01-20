@@ -2,14 +2,11 @@ import type { Route } from './+types/_app.settings'
 import type { ToolName } from '~/models/external-auth.server'
 import {
   Alert,
-  Avatar,
-  Group,
   Stack,
   Text,
   Title,
 } from '@mantine/core'
 import {
-  IconBrandGithub,
   IconInfoCircle,
   IconRobot,
   IconSparkles,
@@ -33,14 +30,9 @@ export function meta() {
 }
 
 interface LoaderData {
-  user: {
-    githubLogin: string
-    avatarUrl: string
-  }
   tools: {
     claude: { configured: boolean, suffix: string | null }
     codex: { configured: boolean, suffix: string | null }
-    github: { configured: boolean }
   }
 }
 
@@ -48,10 +40,9 @@ export async function loader({ request }: Route.LoaderArgs): Promise<LoaderData>
   const user = await requireUser(request)
 
   // Check which tools are configured
-  const [claudeConfigured, codexConfigured, githubConfigured] = await Promise.all([
+  const [claudeConfigured, codexConfigured] = await Promise.all([
     hasExternalAuth(user.id, 'claude'),
     hasExternalAuth(user.id, 'codex'),
-    hasExternalAuth(user.id, 'github'),
   ])
 
   // Get suffixes for configured tools
@@ -61,14 +52,9 @@ export async function loader({ request }: Route.LoaderArgs): Promise<LoaderData>
   ])
 
   return {
-    user: {
-      githubLogin: user.githubLogin,
-      avatarUrl: user.avatarUrl,
-    },
     tools: {
       claude: { configured: claudeConfigured, suffix: claudeSuffix },
       codex: { configured: codexConfigured, suffix: codexSuffix },
-      github: { configured: githubConfigured },
     },
   }
 }
@@ -115,7 +101,7 @@ export async function action({ request }: Route.ActionArgs): Promise<ActionData>
 }
 
 export default function Settings() {
-  const { user, tools } = useLoaderData<LoaderData>()
+  const { tools } = useLoaderData<LoaderData>()
   const fetcher = useFetcher<ActionData>()
 
   const isLoading = fetcher.state !== 'idle'
@@ -192,27 +178,6 @@ export default function Settings() {
             onSave={key => handleSave('codex', key)}
             onDelete={() => handleDelete('codex')}
           />
-        </ExternalToolCard>
-
-        {/* GitHub (OAuth - read-only display) */}
-        <ExternalToolCard
-          title="GitHub"
-          description="GitHub authentication for repository access"
-          icon={<IconBrandGithub size={20} />}
-          isConfigured={tools.github.configured}
-        >
-          <Group gap="md">
-            <Avatar src={user.avatarUrl} size="md" radius="xl" />
-            <div>
-              <Text size="sm" fw={500}>
-                @
-                {user.githubLogin}
-              </Text>
-              <Text size="xs" c="dimmed">
-                Connected via OAuth. Re-authenticate to update permissions.
-              </Text>
-            </div>
-          </Group>
         </ExternalToolCard>
       </Stack>
     </Stack>

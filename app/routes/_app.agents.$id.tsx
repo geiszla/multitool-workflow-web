@@ -7,6 +7,8 @@ import {
   Button,
   Card,
   Group,
+  Loader,
+  Modal,
   Stack,
   Text,
   Title,
@@ -19,18 +21,30 @@ import {
   IconPlayerPause,
   IconPlayerPlay,
   IconPlayerStop,
-  IconRefresh,
+  IconTerminal2,
   IconTrash,
   IconX,
 } from '@tabler/icons-react'
+import { useCallback, useState } from 'react'
 import { redirect, useFetcher, useLoaderData, useNavigate } from 'react-router'
 import { AgentStatusBadge } from '~/components/agents/AgentStatusBadge'
+import { InactivityManager } from '~/components/agents/InactivityManager'
+import { Terminal } from '~/components/agents/Terminal'
+import { useAgentRealtime } from '~/hooks/useAgentRealtime'
 import {
+  deleteAgent,
   getAgentForUser,
   getValidTransitions,
   isActiveStatus,
   updateAgentStatus,
 } from '~/models/agent.server'
+import {
+  deleteInstance,
+  resumeInstance,
+  startInstance,
+  stopInstance,
+  suspendInstance,
+} from '~/services/compute.server'
 import { requireUser } from '~/services/session.server'
 
 export function meta({ data }: Route.MetaArgs) {
@@ -61,6 +75,10 @@ interface LoaderData {
     instanceName?: string
     instanceZone?: string
     instanceStatus?: string
+    terminalReady?: boolean
+    cloneStatus?: string
+    cloneError?: string
+    needsResume?: boolean
   }
   validActions: AgentStatus[]
   isActive: boolean
@@ -97,6 +115,10 @@ export async function loader({ request, params }: Route.LoaderArgs): Promise<Loa
         instanceName: agent.instanceName,
         instanceZone: agent.instanceZone,
         instanceStatus: agent.instanceStatus,
+        terminalReady: agent.terminalReady,
+        cloneStatus: agent.cloneStatus,
+        cloneError: agent.cloneError,
+        needsResume: agent.needsResume,
       },
       validActions: getValidTransitions(agent.status),
       isActive: isActiveStatus(agent.status),
@@ -114,9 +136,10 @@ export async function loader({ request, params }: Route.LoaderArgs): Promise<Loa
 interface ActionData {
   success?: boolean
   error?: string
+  deleted?: boolean
 }
 
-export async function action({ request, params }: Route.ActionArgs): Promise<ActionData> {
+export async function action({ request, params }: Route.ActionArgs): Promise<ActionData | Response> {
   const user = await requireUser(request)
   const agentId = params.id
   const formData = await request.formData()
@@ -129,6 +152,26 @@ export async function action({ request, params }: Route.ActionArgs): Promise<Act
   try {
     const agent = await getAgentForUser(agentId, user.id)
     const validTransitions = getValidTransitions(agent.status)
+
+    // Handle delete action
+    if (intent === 'delete') {
+      // Delete VM if it exists
+      if (agent.instanceName && agent.instanceZone) {
+        try {
+          await deleteInstance(agent.instanceName, agent.instanceZone)
+        }
+        catch (error) {
+          console.error('Failed to delete VM:', error instanceof Error ? error.message : 'Unknown error')
+          // Continue with Firestore deletion even if VM deletion fails
+        }
+      }
+
+      // Delete agent from Firestore
+      await deleteAgent(agentId)
+
+      // Redirect to agents list
+      return redirect('/agents')
+    }
 
     // Map intent to target status
     const statusMap: Record<string, AgentStatus> = {
@@ -149,8 +192,33 @@ export async function action({ request, params }: Route.ActionArgs): Promise<Act
       return { error: `Cannot ${intent} agent in ${agent.status} status` }
     }
 
-    // TODO: Trigger actual GCE operations for suspend/stop/resume/start
-    await updateAgentStatus(agentId, agent.status, targetStatus)
+    // Trigger GCE operations
+    if (agent.instanceName && agent.instanceZone) {
+      try {
+        switch (intent) {
+          case 'suspend':
+            await suspendInstance(agent.instanceName, agent.instanceZone)
+            break
+          case 'stop':
+            await stopInstance(agent.instanceName, agent.instanceZone)
+            break
+          case 'resume':
+            await resumeInstance(agent.instanceName, agent.instanceZone)
+            break
+          case 'start':
+            await startInstance(agent.instanceName, agent.instanceZone)
+            break
+        }
+      }
+      catch (error) {
+        console.error(`Failed to ${intent} VM:`, error instanceof Error ? error.message : 'Unknown error')
+        return { error: `Failed to ${intent} VM: ${error instanceof Error ? error.message : 'Unknown error'}` }
+      }
+    }
+
+    // Update agent status
+    const metadata = intent === 'stop' ? { needsResume: true } : undefined
+    await updateAgentStatus(agentId, agent.status, targetStatus, metadata)
 
     return { success: true }
   }
@@ -161,10 +229,25 @@ export async function action({ request, params }: Route.ActionArgs): Promise<Act
 }
 
 export default function AgentView() {
-  const { agent, validActions, isActive: _isActive } = useLoaderData<LoaderData>()
+  const loaderData = useLoaderData<LoaderData>()
   const navigate = useNavigate()
   const fetcher = useFetcher<ActionData>()
+  const [deleteModalOpen, setDeleteModalOpen] = useState(false)
 
+  // Use realtime data if available, fall back to loader data
+  const { agent: realtimeAgent } = useAgentRealtime(loaderData.agent.id)
+
+  // Merge realtime data with loader data (realtime takes precedence)
+  const agent = {
+    ...loaderData.agent,
+    status: realtimeAgent?.status ?? loaderData.agent.status,
+    terminalReady: realtimeAgent?.terminalReady ?? loaderData.agent.terminalReady,
+    cloneStatus: realtimeAgent?.cloneStatus ?? loaderData.agent.cloneStatus,
+    cloneError: realtimeAgent?.cloneError ?? loaderData.agent.cloneError,
+    errorMessage: realtimeAgent?.errorMessage ?? loaderData.agent.errorMessage,
+  }
+
+  const validActions = getValidTransitions(agent.status)
   const isLoading = fetcher.state !== 'idle'
 
   const formatDate = (isoString?: string) => {
@@ -183,6 +266,20 @@ export default function AgentView() {
     fetcher.submit({ intent }, { method: 'post' })
   }
 
+  const handleDelete = () => {
+    setDeleteModalOpen(false)
+    fetcher.submit({ intent: 'delete' }, { method: 'post' })
+  }
+
+  // Handlers for inactivity manager
+  const handleInactivitySuspend = useCallback(async () => {
+    fetcher.submit({ intent: 'suspend' }, { method: 'post' })
+  }, [fetcher])
+
+  const handleInactivityStop = useCallback(async () => {
+    fetcher.submit({ intent: 'stop' }, { method: 'post' })
+  }, [fetcher])
+
   // Determine which action buttons to show
   const canCancel = validActions.includes('cancelled')
   const canSuspend = validActions.includes('suspended')
@@ -190,21 +287,27 @@ export default function AgentView() {
   const canResume = agent.status === 'suspended' && validActions.includes('running')
   const canStart = agent.status === 'stopped' && validActions.includes('running')
   const canDelete = ['completed', 'failed', 'cancelled', 'stopped'].includes(agent.status)
-  const canRetry = agent.status === 'failed'
+
+  // Terminal visibility conditions
+  const showTerminal = agent.status === 'running' && agent.terminalReady
+  const showProvisioningStatus = ['pending', 'provisioning'].includes(agent.status)
+  const showConnectingStatus = agent.status === 'running' && !agent.terminalReady
+  const showSuspendedStatus = agent.status === 'suspended'
+  const showStoppedStatus = agent.status === 'stopped'
+  const showCompletedStatus = agent.status === 'completed'
+  const showFailedStatus = agent.status === 'failed'
 
   return (
     <Stack gap="lg">
       {/* Header with back button */}
       <Group justify="space-between" align="flex-start">
-        <Group>
-          <Button
-            variant="subtle"
-            leftSection={<IconArrowLeft size={16} />}
-            onClick={() => navigate('/agents')}
-          >
-            Back to Agents
-          </Button>
-        </Group>
+        <Button
+          variant="subtle"
+          leftSection={<IconArrowLeft size={16} />}
+          onClick={() => navigate('/agents')}
+        >
+          Back to Agents
+        </Button>
       </Group>
 
       {/* Error alert */}
@@ -328,26 +431,13 @@ export default function AgentView() {
                 </Button>
               )}
 
-              {canRetry && (
-                <Button
-                  variant="light"
-                  color="blue"
-                  leftSection={<IconRefresh size={16} />}
-                  onClick={() => navigate('/agents')} // TODO: Implement retry
-                  loading={isLoading}
-                >
-                  Retry
-                </Button>
-              )}
-
               {canDelete && (
                 <Button
                   variant="light"
                   color="red"
                   leftSection={<IconTrash size={16} />}
-                  onClick={() => {
-                    // TODO: Implement delete with confirmation
-                  }}
+                  onClick={() => setDeleteModalOpen(true)}
+                  loading={isLoading}
                 >
                   Delete
                 </Button>
@@ -367,6 +457,132 @@ export default function AgentView() {
           {agent.errorMessage}
         </Alert>
       )}
+
+      {/* Clone error */}
+      {agent.cloneError && (
+        <Alert
+          icon={<IconAlertCircle size={16} />}
+          title="Clone Error"
+          color="orange"
+        >
+          {agent.cloneError}
+        </Alert>
+      )}
+
+      {/* Terminal / Status Display */}
+      <Card shadow="sm" padding="lg" radius="md" withBorder style={{ minHeight: 450 }}>
+        {showTerminal && (
+          <div style={{ height: 400 }}>
+            <InactivityManager
+              agentId={agent.id}
+              isRunning={agent.status === 'running'}
+              terminalReady={agent.terminalReady ?? false}
+              onSuspend={handleInactivitySuspend}
+              onStop={handleInactivityStop}
+            >
+              <Terminal agentId={agent.id} />
+            </InactivityManager>
+          </div>
+        )}
+
+        {showProvisioningStatus && (
+          <Stack align="center" justify="center" py="xl" h={400}>
+            <Loader size="lg" />
+            <Title order={4} c="dimmed">
+              {agent.status === 'pending' ? 'Starting...' : 'Provisioning VM...'}
+            </Title>
+            {agent.cloneStatus === 'cloning' && (
+              <Text size="sm" c="dimmed">
+                Cloning repository...
+              </Text>
+            )}
+          </Stack>
+        )}
+
+        {showConnectingStatus && (
+          <Stack align="center" justify="center" py="xl" h={400}>
+            <Loader size="lg" />
+            <Title order={4} c="dimmed">
+              Connecting to agent...
+            </Title>
+            <Text size="sm" c="dimmed">
+              Terminal will be available shortly
+            </Text>
+          </Stack>
+        )}
+
+        {showSuspendedStatus && (
+          <Stack align="center" justify="center" py="xl" h={400}>
+            <IconPlayerPause size={48} color="var(--mantine-color-yellow-6)" />
+            <Title order={4} c="dimmed">
+              Agent Suspended
+            </Title>
+            <Text size="sm" c="dimmed" ta="center">
+              The agent has been suspended due to inactivity.
+              <br />
+              Click Resume to continue.
+            </Text>
+            {canResume && (
+              <Button
+                leftSection={<IconPlayerPlay size={16} />}
+                onClick={() => handleAction('resume')}
+                loading={isLoading}
+                mt="md"
+              >
+                Resume
+              </Button>
+            )}
+          </Stack>
+        )}
+
+        {showStoppedStatus && (
+          <Stack align="center" justify="center" py="xl" h={400}>
+            <IconPlayerStop size={48} color="var(--mantine-color-orange-6)" />
+            <Title order={4} c="dimmed">
+              Agent Stopped
+            </Title>
+            <Text size="sm" c="dimmed" ta="center">
+              The agent has been stopped.
+              <br />
+              Starting will take longer as the VM needs to boot.
+            </Text>
+            {canStart && (
+              <Button
+                leftSection={<IconPlayerPlay size={16} />}
+                onClick={() => handleAction('start')}
+                loading={isLoading}
+                mt="md"
+              >
+                Start
+              </Button>
+            )}
+          </Stack>
+        )}
+
+        {showCompletedStatus && (
+          <Stack align="center" justify="center" py="xl" h={400}>
+            <IconTerminal2 size={48} color="var(--mantine-color-green-6)" />
+            <Title order={4} c="dimmed">
+              Completed
+            </Title>
+            <Text size="sm" c="dimmed" ta="center">
+              The agent has completed its work successfully.
+            </Text>
+          </Stack>
+        )}
+
+        {showFailedStatus && (
+          <Stack align="center" justify="center" py="xl" h={400}>
+            <IconAlertCircle size={48} color="var(--mantine-color-red-6)" />
+            <Title order={4} c="dimmed">
+              Failed
+            </Title>
+            <Text size="sm" c="dimmed" ta="center">
+              The agent encountered an error.
+            </Text>
+          </Stack>
+        )}
+      </Card>
 
       {/* Instructions */}
       {agent.instructions && (
@@ -468,17 +684,33 @@ export default function AgentView() {
         </Card>
       )}
 
-      {/* Placeholder for Part 3 - Agent conversation */}
-      <Card shadow="sm" padding="lg" radius="md" withBorder>
-        <Stack align="center" py="xl">
-          <Title order={4} c="dimmed">
-            Agent Conversation
-          </Title>
-          <Text size="sm" c="dimmed" ta="center">
-            Agent conversation history will appear here in Part 3.
+      {/* Delete Confirmation Modal */}
+      <Modal
+        opened={deleteModalOpen}
+        onClose={() => setDeleteModalOpen(false)}
+        title="Delete Agent"
+        centered
+      >
+        <Stack>
+          <Text>
+            Are you sure you want to delete
+            {' '}
+            <strong>{agent.title}</strong>
+            ?
           </Text>
+          <Text size="sm" c="dimmed">
+            This will delete the agent record and any associated VM resources. This action cannot be undone.
+          </Text>
+          <Group justify="flex-end" mt="md">
+            <Button variant="default" onClick={() => setDeleteModalOpen(false)}>
+              Cancel
+            </Button>
+            <Button color="red" onClick={handleDelete} loading={isLoading}>
+              Delete
+            </Button>
+          </Group>
         </Stack>
-      </Card>
+      </Modal>
     </Stack>
   )
 }

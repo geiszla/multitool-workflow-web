@@ -12,8 +12,10 @@ import {
   createAgent,
   isActiveStatus,
   listUserAgents,
+  updateAgentStatus,
 } from '~/models/agent.server'
 import { getExternalAuth, hasExternalAuth } from '~/models/external-auth.server'
+import { createAgentInstanceAsync } from '~/services/compute.server'
 import {
   listRepoBranches,
   listRepoIssues,
@@ -170,8 +172,33 @@ export async function action({ request }: Route.ActionArgs): Promise<ActionData>
         instructions: instructions || undefined,
       })
 
-      // TODO: Trigger VM provisioning asynchronously
-      // For now, we just create the agent record
+      // Trigger async VM provisioning
+      try {
+        const result = await createAgentInstanceAsync({
+          agentId: agent.id,
+          userId: user.id,
+          repoOwner,
+          repoName,
+          branch,
+          issueNumber: parsedIssueNumber,
+          instructions: instructions || undefined,
+        })
+
+        // Update agent to provisioning status with operation details
+        await updateAgentStatus(agent.id, 'pending', 'provisioning', {
+          instanceName: result.instanceName,
+          instanceZone: result.zone,
+          provisioningOperationId: result.operationId,
+          cloneStatus: 'pending',
+        })
+      }
+      catch (vmError) {
+        // If VM creation fails, update agent to failed status
+        console.error('Failed to start VM:', vmError instanceof Error ? vmError.message : 'Unknown error')
+        await updateAgentStatus(agent.id, 'pending', 'failed', {
+          errorMessage: `Failed to start VM: ${vmError instanceof Error ? vmError.message : 'Unknown error'}`,
+        })
+      }
 
       return { success: true, agentId: agent.id }
     }

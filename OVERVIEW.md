@@ -196,10 +196,180 @@ Terminal: completed, failed, cancelled (no transitions out)
 - Cloud Build CI/CD on push to main
 - Health check at `/healthz`
 
-## Non-Goals (Part 2)
+## WebSocket Architecture (Part 3)
 
-- Agent conversation/context history (Part 3)
-- Real-time agent interaction (Part 3)
-- VM reaper/cleanup job (can be added as Cloud Scheduler)
+Two separate communication channels for optimal performance and reliability:
+
+1. **Firestore Realtime**: Agent status, lifecycle events, activity indicators
+   - Uses Firebase client SDK with custom tokens
+   - Automatic reconnection and offline support
+   - No server polling needed
+
+2. **WebSocket**: Terminal stream only
+   - Direct bidirectional communication for low latency
+   - Typed message protocol (stdin, stdout, resize, ping/pong, error, exit)
+   - Cloud Run handles WebSocket upgrades via custom server
+
+### WebSocket Message Protocol
+
+```typescript
+type WSMessage
+  = | { type: 'stdin', data: string }
+    | { type: 'stdout', data: string }
+    | { type: 'resize', cols: number, rows: number }
+    | { type: 'ping' }
+    | { type: 'pong' }
+    | { type: 'error', message: string }
+    | { type: 'exit', code: number }
+```
+
+## WebSocket Security
+
+**Origin Validation (CSRF Protection)**:
+- Validates Origin header on WebSocket upgrade requests
+- Rejects if Origin doesn't match allowed origins (fail closed)
+- Prevents Cross-Site WebSocket Hijacking (CSWSH)
+
+**Session-based Authorization**:
+- Parses session cookie on WebSocket upgrade
+- Verifies session is valid and not expired
+- Confirms user owns the requested agent
+
+**SSRF Prevention**:
+- VM IP resolved server-side from Firestore (not from client)
+- `internalIp` field never exposed to browser
+
+## Terminal Emulation
+
+**Browser (xterm.js)**:
+- Full terminal emulation with ANSI escape codes
+- Auto-fit to container size
+- Clickable URLs (web-links addon)
+- Reconnection with exponential backoff
+
+**VM (PTY Server)**:
+- WebSocket server on port 8080 (internal only)
+- node-pty for PTY process management
+- Spawns Claude Code CLI in PTY
+- Health check endpoint at `/health`
+
+## VM Startup Flow
+
+Uses systemd services for reliable orchestration:
+
+1. **Startup Script** (runs on VM boot):
+   - Installs Node.js, git, Claude Code CLI
+   - Writes systemd unit files
+   - Enables and starts services
+
+2. **agent-bootstrap.service** (oneshot):
+   - Fetches credentials via GCE instance identity token
+   - Reports internal IP to Cloud Run
+   - Clones repository with GitHub token
+   - Updates status to 'running' on success
+
+3. **pty-server.service** (long-running):
+   - Waits for bootstrap to complete
+   - Starts WebSocket server on :8080
+   - Spawns Claude Code in PTY
+   - Reports `terminalReady: true`
+
+## Credential Flow
+
+**VM to Cloud Run Authentication**:
+1. VM requests identity token from GCE metadata server
+2. Token audience set to Cloud Run URL
+3. Cloud Run verifies token with Google's OAuth2 endpoint
+4. Claims extracted for service account and instance validation
+
+**Credentials Endpoint** (`/api/agents/:id/credentials`):
+- Returns GitHub token, Claude API key, Codex API key
+- Validates GCE identity token
+- Verifies agent status is provisioning/running
+- Credentials not cached on VM disk (in-memory only)
+
+## Inactivity Timeout
+
+**Two-stage timeout system**:
+1. **15 minutes inactive**: Suspend VM (preserves memory, ~30s resume)
+2. **1 hour inactive**: Stop VM (discards memory, ~60s restart)
+
+**Implementation**:
+- Browser tracks activity (keydown, mouse events)
+- Updates `lastActivity` in Firestore every 30 seconds
+- Shows warnings 2 min before suspend, 5 min before stop
+- Pauses timer when tab is hidden
+- Server backup (future): Cloud Scheduler checks `lastActivity`
+
+**Warning States**:
+- `active`: Normal operation
+- `warning-suspend`: 2 min before suspend
+- `warning-stop`: 5 min before stop (after resumed from suspend)
+- `suspending`: Suspend action in progress
+- `stopping`: Stop action in progress
+
+## Resume Modes
+
+**From Suspended (fast)**:
+- VM memory preserved
+- ~30 second resume time
+- Terminal session continues
+
+**From Stopped (slow)**:
+- VM boots fresh, disk preserved
+- ~60 second start time
+- Uses Claude Code `--resume` flag for conversation continuity
+- `needsResume: true` flag stored in Firestore
+
+## Firebase Realtime Integration
+
+**Custom Token Generation**:
+- Server generates Firebase custom token using IAM signBlob API
+- Token UID matches internal user ID
+- 1-hour expiry, Firebase SDK auto-refreshes
+
+**Client Setup**:
+1. Fetch token from `/api/auth/firebase-token`
+2. `signInWithCustomToken()` authenticates Firebase client
+3. `onSnapshot()` subscribes to agent document changes
+
+**Firestore Security Rules**:
+```javascript
+match /agents/{agentId} {
+  allow read: if request.auth != null &&
+    resource.data.userId == request.auth.uid;
+  allow write: if false; // Server-only writes
+}
+```
+
+## Extended Data Model (Part 3)
+
+New fields in `agents/{agentId}`:
+- `internalIp`: VM internal IP (server-side only)
+- `terminalPort`: WebSocket port (default 8080)
+- `lastActivity`: Last user activity timestamp
+- `terminalReady`: True when PTY server is ready
+- `cloneStatus`: 'pending' | 'cloning' | 'completed' | 'failed'
+- `cloneError`: Clone error message if failed
+- `needsResume`: True if stopped, needs --resume flag
+- `provisioningOperationId`: GCE operation ID for polling
+
+## API Endpoints (Part 3)
+
+| Endpoint | Method | Auth | Purpose |
+|----------|--------|------|---------|
+| `/api/agents/:id/credentials` | GET | GCE Identity | VM fetches credentials |
+| `/api/agents/:id/status` | GET/POST | GCE Identity | VM reports status |
+| `/api/agents/:id/activity` | POST | Session | Browser reports activity |
+| `/api/agents/:id/terminal` | WebSocket | Origin + Session | Terminal proxy |
+| `/api/auth/firebase-token` | GET | Session | Get Firebase custom token |
+
+## Non-Goals (Part 2/3)
+
+- Terminal history persistence (ephemeral for MVP)
+- Retry failed agents (future issue)
+- Multi-tab support (single session per agent)
+- GitHub App integration (keep OAuth)
+- Server-side inactivity scheduler (future enhancement)
 - Additional authentication providers
 - User-controlled dark mode toggle

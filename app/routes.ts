@@ -14,6 +14,12 @@ export default [
   route('auth/github/callback', 'routes/auth.github.callback.tsx'),
   route('auth/logout', 'routes/auth.logout.tsx'),
 
+  // API routes (for VM communication)
+  route('api/agents/:id/credentials', 'routes/api.agents.$id.credentials.tsx'),
+  route('api/agents/:id/status', 'routes/api.agents.$id.status.tsx'),
+  route('api/agents/:id/activity', 'routes/api.agents.$id.activity.tsx'),
+  route('api/auth/firebase-token', 'routes/api.auth.firebase-token.tsx'),
+
   // Authenticated app routes
   layout('routes/_app.tsx', [
     route('agents', 'routes/_app.agents.tsx'),

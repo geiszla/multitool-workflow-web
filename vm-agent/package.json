@@ -1,0 +1,15 @@
+{
+  "name": "vm-agent",
+  "type": "module",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Agent services for Multitool Workflow VM",
+  "scripts": {
+    "start:pty": "node pty-server.js",
+    "start:bootstrap": "node bootstrap.js"
+  },
+  "dependencies": {
+    "node-pty": "^1.0.0",
+    "ws": "^8.18.0"
+  }
+}

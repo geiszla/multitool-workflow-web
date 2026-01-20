@@ -27,7 +27,7 @@ export type AgentStatus
  * Terminal states (completed, failed, cancelled) have no outgoing transitions.
  */
 const VALID_TRANSITIONS: Record<AgentStatus, AgentStatus[]> = {
-  pending: ['provisioning'],
+  pending: ['provisioning', 'failed'], // Can fail during initial VM creation
   provisioning: ['running', 'failed'],
   running: ['suspended', 'stopped', 'completed', 'failed', 'cancelled'],
   suspended: ['running', 'stopped', 'cancelled'], // running = resume
@@ -68,6 +68,22 @@ export interface Agent {
   instanceName?: string // GCE instance name
   instanceZone?: string // GCE zone
   instanceStatus?: string // GCE instance status
+
+  // Part 3: New fields for async provisioning and terminal
+  internalIp?: string // VM internal IP (server-side only, not exposed to client)
+  terminalPort?: number // WebSocket port (default 8080)
+  lastActivity?: Timestamp // Last user activity
+  terminalReady?: boolean // True when PTY server is ready
+
+  // Git operation tracking
+  cloneStatus?: 'pending' | 'cloning' | 'completed' | 'failed'
+  cloneError?: string
+
+  // Resume tracking
+  needsResume?: boolean // True if stopped (not suspended), needs --resume flag
+
+  // Provisioning tracking
+  provisioningOperationId?: string // GCE operation ID for polling
 
   // Timestamps
   createdAt: Timestamp
@@ -113,6 +129,12 @@ export interface StatusUpdateMetadata {
   instanceName?: string
   instanceZone?: string
   instanceStatus?: string
+  internalIp?: string
+  terminalReady?: boolean
+  cloneStatus?: 'pending' | 'cloning' | 'completed' | 'failed'
+  cloneError?: string
+  needsResume?: boolean
+  provisioningOperationId?: string
 }
 
 const AGENTS_COLLECTION = 'agents'
@@ -378,4 +400,33 @@ export function isActiveStatus(status: AgentStatus): boolean {
  */
 export function getValidTransitions(status: AgentStatus): AgentStatus[] {
   return VALID_TRANSITIONS[status]
+}
+
+/**
+ * Updates the lastActivity timestamp for an agent.
+ *
+ * Called by the browser InactivityManager to track user activity.
+ * Uses server timestamp to avoid clock skew issues.
+ *
+ * @param agentId - Agent UUID
+ */
+export async function updateAgentActivity(agentId: string): Promise<void> {
+  const db = getFirestore()
+  await db.collection(AGENTS_COLLECTION).doc(agentId).update({
+    lastActivity: Timestamp.now(),
+    updatedAt: Timestamp.now(),
+  })
+}
+
+/**
+ * Deletes an agent from Firestore.
+ *
+ * Note: This only deletes the Firestore document.
+ * The caller is responsible for cleaning up associated resources (VM, etc).
+ *
+ * @param agentId - Agent UUID
+ */
+export async function deleteAgent(agentId: string): Promise<void> {
+  const db = getFirestore()
+  await db.collection(AGENTS_COLLECTION).doc(agentId).delete()
 }
