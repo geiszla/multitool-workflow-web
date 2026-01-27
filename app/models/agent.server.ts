@@ -78,7 +78,8 @@ export interface Agent {
   instanceStatus?: string // GCE instance status
 
   // Part 3: New fields for async provisioning and terminal
-  internalIp?: string // VM internal IP (server-side only, not exposed to client)
+  // NOTE: internalIp is NOT stored in Firestore - fetched on-demand from GCE
+  // to prevent exposure via Firestore subscriptions
   terminalPort?: number // WebSocket port (default 8080)
   terminalReady?: boolean // True when PTY server is ready
 
@@ -131,13 +132,15 @@ export interface ListAgentsResult {
 
 /**
  * Metadata to update when changing agent status.
+ * NOTE: internalIp is NOT included to prevent client exposure via Firestore subscriptions.
+ * The proxy fetches internalIp from GCE on-demand when needed.
  */
 export interface StatusUpdateMetadata {
   errorMessage?: string
   instanceName?: string
   instanceZone?: string
   instanceStatus?: string
-  internalIp?: string
+  // REMOVED: internalIp - fetched on-demand from GCE to prevent client exposure
   terminalReady?: boolean
   cloneStatus?: 'pending' | 'cloning' | 'completed' | 'failed'
   cloneError?: string

@@ -367,9 +367,36 @@ In Firebase Console, ensure:
 
 ### 10.2 Create a Firebase Web App (Required)
 
-The browser uses the Firebase client SDK (see `app/services/firebase.client.ts`). Create a Firebase Web App and replace the placeholder `firebaseConfig` values with your project’s config from Firebase Console.
+The browser uses the Firebase client SDK (see `app/services/firebase.client.ts`). Create a Firebase Web App and configure the client SDK.
 
-These values are *public configuration* (not secrets), but they must be correct for Auth + Firestore to work.
+1. **Create Firebase Web App** in Firebase Console:
+   - Go to Project Settings > General > Your apps
+   - Click "Add app" > Web (</>) icon
+   - Register app with a nickname (e.g., "Multitool Web")
+   - Copy the `firebaseConfig` object from the setup instructions
+
+2. **Configure environment variables** in `.env.production`:
+
+   ```bash
+   # Firebase Client Configuration (public, baked into client bundle)
+   VITE_FIREBASE_API_KEY=your-api-key
+   VITE_FIREBASE_AUTH_DOMAIN=your-project.firebaseapp.com
+   VITE_FIREBASE_PROJECT_ID=your-project-id
+   VITE_FIREBASE_STORAGE_BUCKET=your-project.appspot.com
+   VITE_FIREBASE_MESSAGING_SENDER_ID=123456789
+   VITE_FIREBASE_APP_ID=1:123456789:web:abcdef123456
+   ```
+
+   These values are *public configuration* (not secrets). They are baked into the client bundle during `pnpm build` and used by `app/services/firebase.client.ts`.
+
+3. **For local development**, copy the same values to `.env`:
+
+   ```bash
+   cp .env.production .env
+   # Edit .env as needed for local development
+   ```
+
+**Important**: If these values are missing or incorrect, real-time updates will not work (the client cannot connect to Firebase).
 
 ### 10.3 Deploy Firestore Security Rules
 

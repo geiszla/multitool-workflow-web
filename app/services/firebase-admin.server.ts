@@ -19,7 +19,6 @@
  *     --role="roles/iam.serviceAccountTokenCreator"
  */
 
-import { Buffer } from 'node:buffer'
 import { GoogleAuth } from 'google-auth-library'
 import { GCP_PROJECT_ID } from './env.server'
 
@@ -62,19 +61,6 @@ async function getServiceAccountEmail(): Promise<string> {
 }
 
 /**
- * Firebase custom token payload.
- */
-interface CustomTokenPayload {
-  iss: string // Issuer (service account email)
-  sub: string // Subject (service account email)
-  aud: string // Audience (Firebase token endpoint)
-  iat: number // Issued at
-  exp: number // Expiry (1 hour)
-  uid: string // User ID in Firebase
-  claims?: Record<string, unknown> // Custom claims
-}
-
-/**
  * Creates a Firebase custom token for a user.
  *
  * This token can be used with Firebase client SDK's signInWithCustomToken()
@@ -92,27 +78,44 @@ export async function createCustomToken(
   uid: string,
   claims?: Record<string, unknown>,
 ): Promise<string> {
+  // Validate uid
+  if (!uid || typeof uid !== 'string') {
+    throw new Error('uid must be a non-empty string')
+  }
+  if (uid.length > 128) {
+    throw new Error('uid must be 128 characters or less')
+  }
+
+  // Validate claims don't contain reserved keys
+  if (claims) {
+    const reservedKeys = ['iss', 'sub', 'aud', 'iat', 'exp', 'uid']
+    for (const key of reservedKeys) {
+      if (key in claims) {
+        throw new Error(`claims cannot contain reserved key: ${key}`)
+      }
+    }
+  }
+
   const auth = getAuthClient()
   const saEmail = await getServiceAccountEmail()
 
   const now = Math.floor(Date.now() / 1000)
-  const payload: CustomTokenPayload = {
+
+  // Build the claim-set as a JSON object
+  // Firebase custom tokens require this specific structure
+  const claimSet = {
     iss: saEmail,
     sub: saEmail,
     aud: 'https://identitytoolkit.googleapis.com/google.identity.identitytoolkit.v1.IdentityToolkit',
     iat: now,
-    exp: now + 3600, // 1 hour
+    exp: now + 3600, // 1 hour (Firebase max)
     uid,
-    claims,
+    claims, // Custom claims go inside 'claims' object
   }
 
-  // Create JWT header and payload
-  const headerBase64 = Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).toString('base64url')
-  const payloadBase64 = Buffer.from(JSON.stringify(payload)).toString('base64url')
-  const signatureInput = `${headerBase64}.${payloadBase64}`
-
-  // Use IAM Credentials API signJwt endpoint (purpose-built for JWT signing)
-  // This is more reliable than signBlob as it handles the JWT structure correctly
+  // Use IAM Credentials API signJwt endpoint
+  // The signJwt endpoint expects a JSON string claim-set (not header.payload)
+  // It handles the JWT header and signature internally
   const iamUrl = `https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/${saEmail}:signJwt`
 
   const accessToken = await auth.getAccessToken()
@@ -123,7 +126,7 @@ export async function createCustomToken(
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      payload: signatureInput,
+      payload: JSON.stringify(claimSet), // JSON string of claim-set, NOT header.payload
     }),
   })
 
@@ -141,6 +144,7 @@ export async function createCustomToken(
     throw new Error(`Failed to sign token: ${response.status} ${text}`)
   }
 
+  // Response contains the complete JWT (header + payload + signature)
   const data = await response.json() as { signedJwt: string }
   return data.signedJwt
 }

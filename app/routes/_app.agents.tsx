@@ -10,12 +10,13 @@ import { AgentCard } from '~/components/agents/AgentCard'
 import { NewAgentForm } from '~/components/agents/NewAgentForm'
 import {
   createAgent,
+  getAgent,
   isActiveStatus,
   listAccessibleAgents,
   updateAgentStatus,
 } from '~/models/agent.server'
 import { getExternalAuth, hasExternalAuth } from '~/models/external-auth.server'
-import { createAgentInstanceAsync } from '~/services/compute.server'
+import { createAgentInstanceAsync, waitForOperation } from '~/services/compute.server'
 import {
   listRepoBranches,
   listRepoIssues,
@@ -180,7 +181,7 @@ export async function action({ request }: Route.ActionArgs): Promise<ActionData>
         instructions: instructions || undefined,
       })
 
-      // Trigger async VM provisioning
+      // Start VM provisioning and wait for completion
       try {
         const result = await createAgentInstanceAsync({
           agentId: agent.id,
@@ -192,19 +193,50 @@ export async function action({ request }: Route.ActionArgs): Promise<ActionData>
           instructions: instructions || undefined,
         })
 
-        // Update agent to provisioning status with operation details
+        // IMPORTANT: Store instanceName/zone IMMEDIATELY after GCE insert returns
+        // This allows cleanup if the request times out while waiting for the operation
+        // It also allows VM identity verification once the VM boots
         await updateAgentStatus(agent.id, 'pending', 'provisioning', {
           instanceName: result.instanceName,
           instanceZone: result.zone,
           cloneStatus: 'pending',
         })
+
+        // Wait for the GCE operation to complete (polls every 2s, 5min timeout)
+        // Note: If this times out, the agent is in 'provisioning' with instanceName set,
+        // so the VM can still authenticate and complete setup
+        await waitForOperation(result.operationId, result.zone)
+
+        // Operation succeeded - agent is already in 'provisioning' status
+        // VM bootstrap will transition to 'running' when pty-server is ready
       }
       catch (vmError) {
-        // If VM creation fails, update agent to failed status
-        console.error('Failed to start VM:', vmError instanceof Error ? vmError.message : 'Unknown error')
-        await updateAgentStatus(agent.id, 'pending', 'failed', {
-          errorMessage: `Failed to start VM: ${vmError instanceof Error ? vmError.message : 'Unknown error'}`,
-        })
+        const errorMessage = vmError instanceof Error ? vmError.message : 'Unknown error'
+        const isTimeout = errorMessage.includes('timed out')
+
+        // Check current agent status - may already be in 'provisioning' if the insert succeeded
+        const currentAgent = await getAgent(agent.id)
+        const fromStatus = currentAgent?.status ?? 'pending'
+
+        if (isTimeout && fromStatus === 'provisioning') {
+          // Timeout while waiting for operation - VM may still boot successfully
+          // Leave in 'provisioning' status so VM can authenticate and complete setup
+          // This is not an error - just a slow boot
+          console.warn('VM provisioning timeout (will continue in background):', errorMessage)
+          // Return success - agent is in provisioning, VM will update status when ready
+          return { success: true, agentId: agent.id }
+        }
+
+        // Actual failure (not timeout) - update to failed status
+        console.error('VM provisioning failed:', errorMessage)
+
+        // Only transition to failed if it's a valid transition
+        if (fromStatus === 'pending' || fromStatus === 'provisioning') {
+          await updateAgentStatus(agent.id, fromStatus, 'failed', {
+            errorMessage: `VM provisioning failed: ${errorMessage}`,
+          })
+        }
+        return { error: `VM provisioning failed: ${errorMessage}` }
       }
 
       return { success: true, agentId: agent.id }

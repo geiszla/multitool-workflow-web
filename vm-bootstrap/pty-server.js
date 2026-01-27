@@ -73,7 +73,7 @@ async function getIdentityToken() {
   const metadataUrl = 'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity'
   const audience = CLOUD_RUN_URL
 
-  const response = await fetch(`${metadataUrl}?audience=${encodeURIComponent(audience)}`, {
+  const response = await fetch(`${metadataUrl}?audience=${encodeURIComponent(audience)}&format=full`, {
     headers: { 'Metadata-Flavor': 'Google' },
   })
 
@@ -136,6 +136,9 @@ function spawnPtyProcess(repoDir) {
   const ptyEnv = {
     ...process.env,
     TERM: 'xterm-256color',
+    // Git authentication via GIT_ASKPASS (script reads token from env)
+    GIT_ASKPASS: '/var/lib/agent-bootstrap/git-askpass.sh',
+    GIT_TERMINAL_PROMPT: '0',
   }
 
   // Inject credentials via environment variables
@@ -148,6 +151,9 @@ function spawnPtyProcess(repoDir) {
     }
     if (credentials.githubToken) {
       ptyEnv.GITHUB_PERSONAL_ACCESS_TOKEN = credentials.githubToken
+      // Also set GH_TOKEN and GITHUB_TOKEN for gh CLI compatibility
+      ptyEnv.GH_TOKEN = credentials.githubToken
+      ptyEnv.GITHUB_TOKEN = credentials.githubToken
     }
   }
 
@@ -281,8 +287,15 @@ async function main() {
 
   // Fetch credentials from Cloud Run and hold in memory
   // This is the only time credentials are fetched - they are never written to disk
+  // FAIL-FAST: If credentials cannot be fetched, do NOT start server or report ready
   try {
     credentials = await fetchCredentials()
+
+    // Validate required credentials are present
+    if (!credentials.claudeApiKey) {
+      throw new Error('Missing required Claude API key')
+    }
+
     log('info', 'Credentials fetched successfully', {
       hasGithub: !!credentials.githubToken,
       hasClaude: !!credentials.claudeApiKey,
@@ -296,8 +309,13 @@ async function main() {
     }
   }
   catch (error) {
+    // Log error and exit - do NOT start server or report ready
     log('error', 'Failed to fetch credentials', { error: error.message })
-    // Continue without credentials - PTY will fail but we can show errors
+    await updateStatus({
+      status: 'failed',
+      errorMessage: `PTY server failed to fetch credentials: ${error.message}`,
+    })
+    process.exit(1)
   }
 
   const server = createServer((req, res) => {

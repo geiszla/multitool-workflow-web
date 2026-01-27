@@ -6,7 +6,9 @@
  *
  * Supports two flows:
  * - suspended -> running: Resumes VM (quick, preserves memory state)
- * - stopped -> running: Starts VM (slower, full boot), clears stale internalIp
+ * - stopped -> running: Starts VM (slower, full boot)
+ *
+ * Note: internalIp is NOT stored in Firestore - always fetched on-demand from GCE.
  *
  * Security:
  * - Requires valid session
@@ -14,10 +16,8 @@
  */
 
 import type { ActionFunctionArgs } from 'react-router'
-import { Timestamp } from '@google-cloud/firestore'
-import { canAccessAgent, getAgent } from '~/models/agent.server'
+import { canAccessAgent, getAgent, updateAgentStatus } from '~/models/agent.server'
 import { resumeInstance, startInstance } from '~/services/compute.server'
-import { getFirestore } from '~/services/firestore.server'
 import { requireUser } from '~/services/session.server'
 
 /**
@@ -65,51 +65,10 @@ export async function action({ request, params }: ActionFunctionArgs) {
     }
 
     const previousStatus = agent.status
-    const db = getFirestore()
-    const agentRef = db.collection('agents').doc(agentId)
+    const statusToClaim = agent.status as 'suspended' | 'stopped'
 
-    // Two-phase approach to avoid duplicate GCE operations:
-    // 1. Use transaction to atomically check and claim the status transition
-    // 2. Perform GCE operation outside transaction (idempotent at GCE level)
-    // 3. Update status to running after GCE op succeeds
-    //
-    // This approach handles races correctly:
-    // - If two requests race, only one will claim the transition
-    // - GCE operations are idempotent (resuming an already-resuming VM is fine)
-
-    // Phase 1: Atomically check and claim the transition
-    // We use a transitional status marker to prevent duplicate claims
-    let statusToClaim: 'suspended' | 'stopped' | null = null
-
-    await db.runTransaction(async (transaction) => {
-      const agentDoc = await transaction.get(agentRef)
-      if (!agentDoc.exists) {
-        throw new Error('Agent not found')
-      }
-
-      const currentStatus = agentDoc.data()?.status
-
-      // Check if already running or being resumed (idempotency)
-      if (currentStatus === 'running') {
-        statusToClaim = null
-        return
-      }
-
-      if (currentStatus !== 'suspended' && currentStatus !== 'stopped') {
-        throw new Error(`Cannot resume agent in ${currentStatus} status`)
-      }
-
-      // Claim this status for our GCE operation
-      statusToClaim = currentStatus as 'suspended' | 'stopped'
-      // We don't update status here - we'll do it after GCE op succeeds
-    })
-
-    // If already running, nothing to do
-    if (!statusToClaim) {
-      return json({ success: true, previousStatus, alreadyRunning: true })
-    }
-
-    // Phase 2: Perform GCE operation (outside transaction)
+    // Perform GCE operation first (idempotent at GCE level)
+    // If this fails, we don't update Firestore
     if (statusToClaim === 'suspended') {
       await resumeInstance(agent.instanceName, agent.instanceZone)
     }
@@ -117,23 +76,36 @@ export async function action({ request, params }: ActionFunctionArgs) {
       await startInstance(agent.instanceName, agent.instanceZone)
     }
 
-    // Phase 3: Update status to running after GCE op succeeds
-    const updateData: Record<string, unknown> = {
-      status: 'running',
-      updatedAt: Timestamp.now(),
-      startedAt: Timestamp.now(),
-      lastHeartbeatAt: Timestamp.now(),
+    // Use state machine for status transition (provides optimistic locking)
+    try {
+      await updateAgentStatus(
+        agentId,
+        statusToClaim,
+        'running',
+        {
+          terminalReady: false, // Reset until pty-server reports ready
+          needsResume: false, // Clear flag on successful transition
+          // NOTE: internalIp is NOT stored in Firestore - fetched on-demand from GCE
+        },
+      )
     }
-
-    if (statusToClaim === 'stopped') {
-      // Clear stale data for stop->start transition
-      // internalIp may change after VM restart
-      // terminalReady should be false until pty-server reports ready
-      updateData.internalIp = null
-      updateData.terminalReady = false
+    catch (error) {
+      // Handle 409 conflict - re-fetch to check actual status
+      const statusError = error as Error & { status?: number }
+      if (statusError.status === 409) {
+        // Re-fetch agent to see what actually happened
+        const refreshedAgent = await getAgent(agentId)
+        if (refreshedAgent?.status === 'running') {
+          // Someone else already resumed - this is a success case
+          return json({ success: true, previousStatus, alreadyRunning: true })
+        }
+        // Status changed to something else (stopped, failed) - report actual error
+        return json({
+          error: `Agent status changed to ${refreshedAgent?.status ?? 'unknown'}`,
+        }, { status: 409 })
+      }
+      throw error
     }
-
-    await agentRef.update(updateData)
 
     return json({ success: true, previousStatus })
   }

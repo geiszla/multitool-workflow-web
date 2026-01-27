@@ -108,8 +108,14 @@ function parseZone(zoneUrl: string): string {
 
 /**
  * Waits for a zone operation to complete.
+ * Polls every 2 seconds with a default 5 minute timeout.
+ *
+ * @param operationName - GCE operation name
+ * @param zone - GCE zone
+ * @param timeoutMs - Timeout in milliseconds (default 5 minutes)
+ * @throws Error if operation fails or times out
  */
-async function waitForOperation(
+export async function waitForOperation(
   operationName: string,
   zone: string,
   timeoutMs = 300000, // 5 minutes default

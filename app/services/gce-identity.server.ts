@@ -10,7 +10,8 @@
  * @see https://cloud.google.com/compute/docs/instances/verifying-instance-identity
  */
 
-import { env } from './env.server'
+import { OAuth2Client } from 'google-auth-library'
+import { env, GCP_PROJECT_ID } from './env.server'
 
 /**
  * Claims extracted from a verified GCE identity token.
@@ -50,14 +51,17 @@ export interface VerificationResult {
   error?: string
 }
 
-// Google OAuth2 token info endpoint
-const TOKEN_INFO_URL = 'https://oauth2.googleapis.com/tokeninfo'
+// Singleton OAuth2Client for cryptographic JWT verification
+const oauthClient = new OAuth2Client()
 
-// Expected service account for agent VMs
-const AGENT_SERVICE_ACCOUNT_PREFIX = 'agent-vm@'
+// Expected service account email for agent VMs
+const EXPECTED_SERVICE_ACCOUNT_EMAIL = `agent-vm@${GCP_PROJECT_ID}.iam.gserviceaccount.com`
 
 /**
- * Verifies a GCE instance identity token.
+ * Verifies a GCE instance identity token using cryptographic verification.
+ *
+ * Uses OAuth2Client.verifyIdToken() for proper JWT signature verification
+ * instead of the tokeninfo endpoint.
  *
  * @param token - The identity token from the Authorization header
  * @param expectedAudience - The expected audience (our Cloud Run URL)
@@ -68,58 +72,37 @@ export async function verifyGceIdentityToken(
   expectedAudience?: string,
 ): Promise<VerificationResult> {
   try {
-    // Use Google's tokeninfo endpoint to verify the token
-    // This is simpler than verifying the JWT signature ourselves
-    const response = await fetch(`${TOKEN_INFO_URL}?id_token=${encodeURIComponent(token)}`)
-
-    if (!response.ok) {
-      const text = await response.text()
-      return {
-        valid: false,
-        error: `Token verification failed: ${response.status} ${text}`,
-      }
-    }
-
-    const claims = await response.json() as GceIdentityClaims
-
-    // Verify audience matches our expected audience
     const audience = expectedAudience || env.APP_URL
-    if (claims.aud !== audience) {
-      return {
-        valid: false,
-        error: `Invalid audience: expected ${audience}, got ${claims.aud}`,
-      }
+
+    // Cryptographic verification (fetches Google certs, verifies signature)
+    const ticket = await oauthClient.verifyIdToken({
+      idToken: token,
+      audience,
+    })
+
+    const payload = ticket.getPayload()
+    if (!payload) {
+      return { valid: false, error: 'No payload in token' }
     }
 
-    // Verify issuer
-    if (claims.iss !== 'accounts.google.com' && claims.iss !== 'https://accounts.google.com') {
-      return {
-        valid: false,
-        error: `Invalid issuer: ${claims.iss}`,
-      }
+    // Post-verification claim validation (fail closed)
+    // 1. Verify issuer
+    if (payload.iss !== 'https://accounts.google.com' && payload.iss !== 'accounts.google.com') {
+      return { valid: false, error: `Invalid issuer: ${payload.iss}` }
     }
 
-    // Verify service account is our agent VM account
-    if (!claims.email?.startsWith(AGENT_SERVICE_ACCOUNT_PREFIX)) {
-      return {
-        valid: false,
-        error: `Invalid service account: ${claims.email}`,
-      }
+    // 2. Verify email (exact match, not prefix)
+    if (payload.email !== EXPECTED_SERVICE_ACCOUNT_EMAIL || !payload.email_verified) {
+      return { valid: false, error: `Invalid service account: ${payload.email}` }
     }
 
-    // Verify token hasn't expired (with 30 second leeway)
-    const now = Math.floor(Date.now() / 1000)
-    if (claims.exp < now - 30) {
-      return {
-        valid: false,
-        error: 'Token expired',
-      }
+    // 3. Require GCE claims (enforces format=full)
+    const gceClaims = (payload as GceIdentityClaims).google?.compute_engine
+    if (!gceClaims?.instance_name) {
+      return { valid: false, error: 'Missing GCE instance metadata (format=full required)' }
     }
 
-    return {
-      valid: true,
-      claims,
-    }
+    return { valid: true, claims: payload as GceIdentityClaims }
   }
   catch (error) {
     return {
@@ -136,17 +119,22 @@ export async function verifyGceIdentityToken(
  * for the agent they were created for, preventing unauthorized access
  * to other agents' credentials or status.
  *
- * @param agentId - Agent UUID from URL params
+ * Defense in depth: Also validates zone to prevent cross-zone impersonation,
+ * since instance names are only unique within a zone.
+ *
+ * @param storedInstanceName - Instance name stored in Firestore (source of truth)
  * @param claims - Verified GCE identity claims
+ * @param storedInstanceZone - Optional zone stored in Firestore (for additional validation)
  * @returns True if the instance is authorized for this agent
  */
 export function validateInstanceForAgent(
-  agentId: string,
+  storedInstanceName: string | undefined,
   claims: GceIdentityClaims,
+  storedInstanceZone?: string,
 ): boolean {
-  // The instance name is formatted as "agent-{first8chars}" in compute.server.ts
-  const expectedInstancePrefix = `agent-${agentId.slice(0, 8)}`
-  const instanceName = claims.google?.compute_engine?.instance_name
+  const gceClaims = claims.google?.compute_engine
+  const instanceName = gceClaims?.instance_name
+  const instanceZone = gceClaims?.zone
 
   if (!instanceName) {
     // If instance metadata is not available, we cannot verify
@@ -155,10 +143,33 @@ export function validateInstanceForAgent(
     return false
   }
 
-  // Verify the instance name matches the expected pattern for this agent
-  if (instanceName !== expectedInstancePrefix) {
-    console.warn(`GCE identity: Instance name mismatch. Expected ${expectedInstancePrefix}, got ${instanceName}`)
+  if (!storedInstanceName) {
+    // If we don't have a stored instance name to compare against, fail closed
+    console.warn('GCE identity: No stored instance name to validate against')
     return false
+  }
+
+  // Verify the instance name from token matches the stored instance name (source of truth)
+  if (instanceName !== storedInstanceName) {
+    console.warn(`GCE identity: Instance name mismatch. Expected ${storedInstanceName}, got ${instanceName}`)
+    return false
+  }
+
+  // Defense in depth: If we have a stored zone, verify it matches
+  // Instance names are only unique within a zone, so this prevents cross-zone impersonation
+  if (storedInstanceZone) {
+    if (!instanceZone) {
+      // If we expect a zone but token doesn't have one, fail closed
+      console.warn('GCE identity: Zone validation required but token has no zone claim')
+      return false
+    }
+    // Zone format in token: "projects/PROJECT_NUM/zones/ZONE_NAME"
+    // We only need to compare the zone name portion
+    const tokenZoneName = instanceZone.split('/').pop()
+    if (tokenZoneName !== storedInstanceZone) {
+      console.warn(`GCE identity: Zone mismatch. Expected ${storedInstanceZone}, got ${tokenZoneName}`)
+      return false
+    }
   }
 
   return true
@@ -168,14 +179,22 @@ export function validateInstanceForAgent(
  * Extracts and validates agent ID from request.
  * Verifies that the requesting VM instance is authorized for this agent.
  *
+ * Note: This function now requires the storedInstanceName to be passed in,
+ * as it performs authorization binding against the Firestore source of truth.
+ * Callers must fetch the agent first and pass agent.instanceName and agent.instanceZone.
+ *
  * @param params - Route params containing the agent ID
  * @param params.id - Optional agent ID from URL
  * @param claims - Verified GCE identity claims
+ * @param storedInstanceName - Instance name from Firestore (source of truth)
+ * @param storedInstanceZone - Optional zone from Firestore (for additional validation)
  * @returns Agent ID if valid and authorized, null otherwise
  */
 export function extractAgentId(
   params: { id?: string },
   claims: GceIdentityClaims,
+  storedInstanceName?: string,
+  storedInstanceZone?: string,
 ): string | null {
   const agentId = params.id
   if (!agentId) {
@@ -183,7 +202,7 @@ export function extractAgentId(
   }
 
   // Validate that this VM instance is authorized to access this agent
-  if (!validateInstanceForAgent(agentId, claims)) {
+  if (!validateInstanceForAgent(storedInstanceName, claims, storedInstanceZone)) {
     console.warn(`GCE identity: VM not authorized for agent ${agentId}`)
     return null
   }

@@ -69,20 +69,27 @@ export async function loader({ request, params }: Route.LoaderArgs) {
     return json({ error: verification.error || 'Invalid token' }, { status: 401 })
   }
 
-  // Extract agent ID from params
-  const agentId = extractAgentId(params, verification.claims)
-
+  // Extract agent ID from params (basic validation)
+  const agentId = params.id
   if (!agentId) {
     console.warn('Credentials API: Missing agent ID')
     return json({ error: 'Missing agent ID' }, { status: 400 })
   }
 
-  // Fetch agent from Firestore
+  // Fetch agent from Firestore first (needed for instance name validation)
   const agent = await getAgent(agentId)
 
   if (!agent) {
     console.warn(`Credentials API: Agent not found: ${agentId}`)
     return json({ error: 'Agent not found' }, { status: 404 })
+  }
+
+  // Validate that this VM instance is authorized for this agent
+  // Uses stored instanceName and instanceZone from Firestore as source of truth
+  const validatedAgentId = extractAgentId(params, verification.claims, agent.instanceName, agent.instanceZone)
+  if (!validatedAgentId) {
+    console.warn(`Credentials API: VM not authorized for agent ${agentId}`)
+    return json({ error: 'VM not authorized for this agent' }, { status: 403 })
   }
 
   // Verify agent is in a valid state (provisioning or running)

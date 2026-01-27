@@ -55,15 +55,17 @@ export async function action({ request, params }: ActionFunctionArgs) {
     return json({ error: 'Invalid VM token' }, { status: 401 })
   }
 
-  const extractedAgentId = extractAgentId(params, verification.claims)
-  if (extractedAgentId !== agentId) {
-    return json({ error: 'Token does not match agent' }, { status: 403 })
-  }
-
-  // Verify agent exists
+  // Fetch agent first (needed for instance name validation)
   const agent = await getAgent(agentId)
   if (!agent) {
     return json({ error: 'Agent not found' }, { status: 404 })
+  }
+
+  // Validate that this VM instance is authorized for this agent
+  // Uses stored instanceName and instanceZone from Firestore as source of truth
+  const extractedAgentId = extractAgentId(params, verification.claims, agent.instanceName, agent.instanceZone)
+  if (extractedAgentId !== agentId) {
+    return json({ error: 'Token does not match agent' }, { status: 403 })
   }
 
   // Only update heartbeat for running agents

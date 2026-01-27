@@ -245,6 +245,12 @@ export async function action({ request, params }: Route.ActionArgs): Promise<Act
         return { error: 'Only the owner can delete this agent' }
       }
 
+      // Safety check: If agent is in provisioning status but has no instanceName,
+      // refuse to delete - this could orphan a VM that's being created
+      if (agent.status === 'provisioning' && !agent.instanceName) {
+        return { error: 'Cannot delete agent while VM is being created. Please wait and try again.' }
+      }
+
       // Delete VM first if it exists
       if (agent.instanceName && agent.instanceZone) {
         try {
@@ -314,10 +320,10 @@ export async function action({ request, params }: Route.ActionArgs): Promise<Act
       metadata = { needsResume: true }
     }
     else if (intent === 'start') {
-      // For stopped -> running transition, clear stale data
-      // internalIp may change after VM restart
+      // For stopped -> running transition, reset terminal ready state
       // terminalReady should be false until pty-server reports ready
-      metadata = { internalIp: null, terminalReady: false }
+      // NOTE: internalIp is NOT stored in Firestore - fetched on-demand from GCE
+      metadata = { terminalReady: false }
     }
     await updateAgentStatus(agentId, agent.status, targetStatus, metadata)
 
@@ -419,7 +425,10 @@ export default function AgentView() {
   const canStart = agent.status === 'stopped' && validActions.includes('running')
   // Allow delete on terminal states + stopped + suspended (not running/provisioning)
   // Suspended VMs should be deletable since they still incur some cost
-  const canDelete = isOwner && ['failed', 'stopped', 'pending', 'suspended'].includes(agent.status)
+  // Allow delete on terminal states + stopped + suspended + provisioning (not running)
+  // Suspended VMs should be deletable since they still incur some cost
+  // Provisioning VMs should be deletable in case of stuck provisioning
+  const canDelete = isOwner && ['failed', 'stopped', 'pending', 'suspended', 'provisioning'].includes(agent.status)
   const canShare = isOwner
   const canFinish = isOwner && agent.status === 'running' && agent.terminalReady
 

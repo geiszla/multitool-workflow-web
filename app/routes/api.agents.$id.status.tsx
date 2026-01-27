@@ -14,7 +14,7 @@ import type { Route } from './+types/api.agents.$id.status'
 import type { AgentStatus } from '~/models/agent.server'
 import { Timestamp } from '@google-cloud/firestore'
 import { getAgent, updateAgentStatus } from '~/models/agent.server'
-import { getInstanceStatus, stopInstanceAsync } from '~/services/compute.server'
+import { stopInstanceAsync } from '~/services/compute.server'
 import { getFirestore } from '~/services/firestore.server'
 import {
   extractAgentId,
@@ -67,9 +67,8 @@ export async function action({ request, params }: Route.ActionArgs) {
     return json({ error: verification.error || 'Invalid token' }, { status: 401 })
   }
 
-  // Extract agent ID from params
-  const agentId = extractAgentId(params, verification.claims)
-
+  // Extract agent ID from params (basic validation)
+  const agentId = params.id
   if (!agentId) {
     console.warn('Status API: Missing agent ID')
     return json({ error: 'Missing agent ID' }, { status: 400 })
@@ -84,12 +83,20 @@ export async function action({ request, params }: Route.ActionArgs) {
     return json({ error: 'Invalid JSON body' }, { status: 400 })
   }
 
-  // Fetch agent from Firestore
+  // Fetch agent from Firestore first (needed for instance name validation)
   const agent = await getAgent(agentId)
 
   if (!agent) {
     console.warn(`Status API: Agent not found: ${agentId}`)
     return json({ error: 'Agent not found' }, { status: 404 })
+  }
+
+  // Validate that this VM instance is authorized for this agent
+  // Uses stored instanceName and instanceZone from Firestore as source of truth
+  const validatedAgentId = extractAgentId(params, verification.claims, agent.instanceName, agent.instanceZone)
+  if (!validatedAgentId) {
+    console.warn('Status API: VM not authorized for agent', agentId)
+    return json({ error: 'VM not authorized for this agent' }, { status: 403 })
   }
 
   // eslint-disable-next-line no-console
@@ -103,29 +110,14 @@ export async function action({ request, params }: Route.ActionArgs) {
   try {
     // Handle full status transition
     if (body.status && body.status !== agent.status) {
-      // When transitioning to 'running', fetch internalIp from GCE server-side
-      // This is a security measure to prevent SSRF attacks
-      // Only attempt if we have both instanceName and instanceZone
-      let internalIp: string | undefined
-      if (body.status === 'running' && agent.instanceName && agent.instanceZone) {
-        try {
-          const instanceInfo = await getInstanceStatus(agent.instanceName, agent.instanceZone)
-          internalIp = instanceInfo?.internalIp
-          if (!internalIp) {
-            console.warn(`Status API: Could not get internal IP for instance ${agent.instanceName}`)
-          }
-        }
-        catch (error) {
-          console.error(`Status API: Failed to get instance status for ${agent.instanceName}:`, error)
-        }
-      }
-
+      // NOTE: internalIp is NOT stored in Firestore to prevent client exposure
+      // The proxy fetches it from GCE on-demand when needed
       await updateAgentStatus(agentId, agent.status, body.status, {
         errorMessage: body.errorMessage,
         terminalReady: body.terminalReady,
         cloneStatus: body.cloneStatus,
         cloneError: body.cloneError,
-        internalIp, // Server-fetched from GCE, not from VM request
+        // REMOVED: internalIp - now fetched on-demand from GCE to prevent client exposure
       })
 
       // When agent exits (stopped/failed), stop the VM asynchronously
@@ -196,17 +188,25 @@ export async function loader({ request, params }: Route.LoaderArgs) {
     return json({ error: verification.error || 'Invalid token' }, { status: 401 })
   }
 
-  // Validate that this VM instance is authorized for this agent
-  // (same binding check as POST endpoint)
-  const agentId = extractAgentId(params, verification.claims)
+  // Extract agent ID from params (basic validation)
+  const agentId = params.id
   if (!agentId) {
-    console.warn('Status API GET: VM not authorized for agent')
-    return json({ error: 'VM not authorized for this agent' }, { status: 403 })
+    console.warn('Status API GET: Missing agent ID')
+    return json({ error: 'Missing agent ID' }, { status: 400 })
   }
 
+  // Fetch agent first (needed for instance name validation)
   const agent = await getAgent(agentId)
   if (!agent) {
     return json({ error: 'Agent not found' }, { status: 404 })
+  }
+
+  // Validate that this VM instance is authorized for this agent
+  // Uses stored instanceName and instanceZone from Firestore as source of truth
+  const validatedAgentId = extractAgentId(params, verification.claims, agent.instanceName, agent.instanceZone)
+  if (!validatedAgentId) {
+    console.warn('Status API GET: VM not authorized for agent')
+    return json({ error: 'VM not authorized for this agent' }, { status: 403 })
   }
 
   return json({

@@ -259,11 +259,10 @@ export async function setupProxyConnection(
     return { success: false, error: 'Terminal not ready', errorCode: 4503 }
   }
 
-  // 6. Resolve VM IP (server-side only, not from client)
-  // Try agent.internalIp first, then fetch from GCE if missing
-  // Only attempt GCE fetch if we have both instanceName and instanceZone
-  let vmIp = agent.internalIp
-  if (!vmIp && agent.instanceName && agent.instanceZone) {
+  // 6. Resolve VM IP (server-side only, fetched from GCE on each connection)
+  // Never stores in Firestore to prevent client exposure
+  let vmIp: string | undefined
+  if (agent.instanceName && agent.instanceZone) {
     // Fetch from GCE with retry
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
@@ -272,18 +271,6 @@ export async function setupProxyConnection(
           vmIp = instanceInfo.internalIp
           // eslint-disable-next-line no-console
           console.log(`WebSocket proxy: Fetched internal IP from GCE for agent ${agentId}: ${vmIp}`)
-
-          // Update Firestore with the IP for future connections
-          try {
-            const db = getFirestore()
-            await db.collection('agents').doc(agentId).update({
-              internalIp: vmIp,
-              updatedAt: Timestamp.now(),
-            })
-          }
-          catch (updateError) {
-            console.warn('WebSocket proxy: Failed to update internalIp in Firestore:', updateError)
-          }
           break
         }
       }

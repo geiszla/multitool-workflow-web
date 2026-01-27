@@ -39,7 +39,7 @@ async function getIdentityToken() {
   const metadataUrl = 'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity'
   const audience = CLOUD_RUN_URL
 
-  const response = await fetch(`${metadataUrl}?audience=${encodeURIComponent(audience)}`, {
+  const response = await fetch(`${metadataUrl}?audience=${encodeURIComponent(audience)}&format=full`, {
     headers: { 'Metadata-Flavor': 'Google' },
   })
 
@@ -147,12 +147,15 @@ async function cloneRepository(credentials) {
   // Use HTTPS URL without embedded credentials
   const cloneUrl = `https://github.com/${safeRepoOwner}/${safeRepoName}.git`
 
-  // Create a temporary askpass script that provides credentials from environment
-  const askpassScript = join(WORK_DIR, '.git-askpass.sh')
+  // Create a PERMANENT askpass script in systemd StateDirectory
+  // This script reads the token from environment (never stored on disk)
+  // and will be used by pty-server for git push operations
+  const askpassScript = join(STATE_DIR, 'git-askpass.sh')
   writeFileSync(askpassScript, `#!/bin/sh
+# Git askpass script - reads token from environment (never stored on disk)
 case "$1" in
   Username*) echo "x-access-token" ;;
-  Password*) echo "$GIT_TOKEN" ;;
+  Password*) echo "$GITHUB_PERSONAL_ACCESS_TOKEN" ;;
 esac
 `, { mode: 0o700 })
 
@@ -162,7 +165,7 @@ esac
     const gitEnv = {
       ...process.env,
       GIT_ASKPASS: askpassScript,
-      GIT_TOKEN: githubToken,
+      GITHUB_PERSONAL_ACCESS_TOKEN: githubToken,
       GIT_TERMINAL_PROMPT: '0',
     }
 
@@ -184,7 +187,7 @@ esac
     execFileSync('git', ['config', 'user.email', 'agent@multitool-workflow.web'], { cwd: repoDir })
     execFileSync('git', ['config', 'user.name', 'Multitool Agent'], { cwd: repoDir })
 
-    // Disable credential helper - we don't want tokens stored on disk
+    // Disable credential helper - we use GIT_ASKPASS instead
     execFileSync('git', ['config', 'credential.helper', ''], { cwd: repoDir })
 
     log('info', 'Repository cloned successfully')
@@ -197,21 +200,12 @@ esac
     const safeErrorMsg = error.message
       .replace(githubToken, '[REDACTED]')
       .replace(/password=\S+/gi, 'password=[REDACTED]')
-      .replace(/GIT_TOKEN=\S+/gi, 'GIT_TOKEN=[REDACTED]')
+      .replace(/GITHUB_PERSONAL_ACCESS_TOKEN=\S+/gi, 'GITHUB_PERSONAL_ACCESS_TOKEN=[REDACTED]')
     log('error', 'Failed to clone repository', { error: safeErrorMsg })
     await updateStatus({ cloneStatus: 'failed', cloneError: safeErrorMsg })
     throw new Error(safeErrorMsg)
   }
-  finally {
-    // Clean up askpass script
-    try {
-      const { unlinkSync } = await import('node:fs')
-      unlinkSync(askpassScript)
-    }
-    catch {
-      // Ignore cleanup errors
-    }
-  }
+  // NOTE: Do NOT delete the askpass script - it's needed for git push operations
 }
 
 /**
