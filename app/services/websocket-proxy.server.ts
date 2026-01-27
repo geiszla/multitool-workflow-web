@@ -17,8 +17,9 @@ import type WebSocket from 'ws'
 import { Timestamp } from '@google-cloud/firestore'
 import { createCookieSessionStorage } from 'react-router'
 import { WebSocket as WsClient } from 'ws'
-import { canAccessAgent, getAgent } from '~/models/agent.server'
+import { canAccessAgent, getAgent, markAgentFailed } from '~/models/agent.server'
 import { getSession as getFirestoreSession } from '~/models/session.server'
+import { getInstanceStatus } from '~/services/compute.server'
 import { getFirestore } from '~/services/firestore.server'
 import { env } from './env.server'
 import { getSecret } from './secrets.server'
@@ -163,23 +164,6 @@ async function validateSession(request: IncomingMessage): Promise<string | null>
 }
 
 /**
- * Updates the lastActivity timestamp for an agent.
- *
- * @param agentId - Agent UUID
- */
-async function updateLastActivity(agentId: string): Promise<void> {
-  try {
-    const db = getFirestore()
-    await db.collection('agents').doc(agentId).update({
-      lastActivity: Timestamp.now(),
-    })
-  }
-  catch (error) {
-    console.error('Failed to update lastActivity:', error)
-  }
-}
-
-/**
  * Updates the lastHeartbeatAt timestamp for an agent (throttled).
  * Used by the server-side reaper to track VM activity.
  *
@@ -276,7 +260,44 @@ export async function setupProxyConnection(
   }
 
   // 6. Resolve VM IP (server-side only, not from client)
-  const vmIp = agent.internalIp
+  // Try agent.internalIp first, then fetch from GCE if missing
+  // Only attempt GCE fetch if we have both instanceName and instanceZone
+  let vmIp = agent.internalIp
+  if (!vmIp && agent.instanceName && agent.instanceZone) {
+    // Fetch from GCE with retry
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const instanceInfo = await getInstanceStatus(agent.instanceName, agent.instanceZone)
+        if (instanceInfo?.internalIp) {
+          vmIp = instanceInfo.internalIp
+          // eslint-disable-next-line no-console
+          console.log(`WebSocket proxy: Fetched internal IP from GCE for agent ${agentId}: ${vmIp}`)
+
+          // Update Firestore with the IP for future connections
+          try {
+            const db = getFirestore()
+            await db.collection('agents').doc(agentId).update({
+              internalIp: vmIp,
+              updatedAt: Timestamp.now(),
+            })
+          }
+          catch (updateError) {
+            console.warn('WebSocket proxy: Failed to update internalIp in Firestore:', updateError)
+          }
+          break
+        }
+      }
+      catch (error) {
+        console.warn(`WebSocket proxy: GCE fetch attempt ${attempt + 1} failed:`, error)
+      }
+
+      // Exponential backoff: 500ms, 1s, 2s
+      if (attempt < 2) {
+        await new Promise(resolve => setTimeout(resolve, 500 * 2 ** attempt))
+      }
+    }
+  }
+
   if (!vmIp) {
     console.error('WebSocket proxy: No internal IP for agent:', agentId)
     // Use WebSocket close code 4500 (custom code for server error) instead of HTTP 500
@@ -300,8 +321,8 @@ export async function setupProxyConnection(
     // eslint-disable-next-line no-console
     console.log('WebSocket proxy: Connected to VM for agent:', agentId)
 
-    // Update last activity
-    updateLastActivity(agentId)
+    // Initialize heartbeat on connection
+    updateHeartbeat(agentId)
   })
 
   vmWs.on('message', (data: Buffer | string) => {
@@ -323,9 +344,29 @@ export async function setupProxyConnection(
     }
   })
 
-  vmWs.on('error', (error) => {
+  vmWs.on('error', async (error) => {
     console.error('WebSocket proxy: VM connection error:', error.message)
     vmConnected = false
+
+    // Check if VM still exists - if not, mark agent as failed
+    // Only check if we have both instanceName and instanceZone
+    if (agent.instanceName && agent.instanceZone) {
+      try {
+        const instanceInfo = await getInstanceStatus(agent.instanceName, agent.instanceZone)
+        if (!instanceInfo) {
+          // VM was deleted externally - mark agent as failed using state machine
+          console.error(`WebSocket proxy: VM ${agent.instanceName} not found, marking agent ${agentId} as failed`)
+          const updated = await markAgentFailed(agentId, 'VM was deleted externally')
+          if (!updated) {
+            console.warn(`WebSocket proxy: Could not mark agent ${agentId} as failed (already terminal or not found)`)
+          }
+        }
+      }
+      catch (checkError) {
+        console.warn('WebSocket proxy: Failed to check VM status:', checkError)
+      }
+    }
+
     if (browserConnected && ws.readyState === ws.OPEN) {
       ws.send(JSON.stringify({ type: 'error', message: 'VM connection error' }))
       ws.close(1011, 'VM connection error')
@@ -338,11 +379,10 @@ export async function setupProxyConnection(
       // Forward message from browser to VM
       vmWs.send(data.toString())
 
-      // Update last activity and heartbeat on user input
+      // Update heartbeat on user input (stdin only, not resize or other messages)
       try {
         const msg = JSON.parse(data.toString()) as WsMessage
         if (msg.type === 'stdin') {
-          updateLastActivity(agentId)
           updateHeartbeat(agentId)
         }
       }

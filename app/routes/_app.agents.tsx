@@ -45,6 +45,7 @@ interface LoaderData {
     isOwned: boolean
   }>
   claudeConfigured: boolean
+  isComped: boolean // True if user is comped (uses org API keys)
   hasActiveAgents: boolean
   currentUserId: string
 }
@@ -63,7 +64,8 @@ export async function loader({ request }: Route.LoaderArgs): Promise<LoaderData>
   let repos: RepoDto[] = []
   if (githubToken) {
     try {
-      repos = await listUserRepos(githubToken, { limit: 50 })
+      const result = await listUserRepos(githubToken, { limit: 50 })
+      repos = result.repos
     }
     catch (error) {
       console.error('Failed to load repos:', error instanceof Error ? error.message : 'Unknown error')
@@ -88,6 +90,7 @@ export async function loader({ request }: Route.LoaderArgs): Promise<LoaderData>
       isOwned: agent.userId === user.id,
     })),
     claudeConfigured,
+    isComped: user.isComped ?? false,
     hasActiveAgents,
     currentUserId: user.id,
   }
@@ -148,9 +151,9 @@ export async function action({ request }: Route.ActionArgs): Promise<ActionData>
       return { error: 'Repository, branch are required' }
     }
 
-    // Verify Claude API key is configured
+    // Verify Claude API key is configured (unless user is comped)
     const claudeConfigured = await hasExternalAuth(user.id, 'claude')
-    if (!claudeConfigured) {
+    if (!claudeConfigured && !(user.isComped ?? false)) {
       return { error: 'Claude API key must be configured in settings' }
     }
 
@@ -193,7 +196,6 @@ export async function action({ request }: Route.ActionArgs): Promise<ActionData>
         await updateAgentStatus(agent.id, 'pending', 'provisioning', {
           instanceName: result.instanceName,
           instanceZone: result.zone,
-          provisioningOperationId: result.operationId,
           cloneStatus: 'pending',
         })
       }
@@ -217,7 +219,10 @@ export async function action({ request }: Route.ActionArgs): Promise<ActionData>
 }
 
 export default function Agents() {
-  const { repos, agents, claudeConfigured } = useLoaderData<LoaderData>()
+  const { repos, agents, claudeConfigured, isComped } = useLoaderData<LoaderData>()
+
+  // Comped users can create agents without their own Claude API key
+  const canCreateAgents = claudeConfigured || isComped
 
   return (
     <Stack gap="lg">
@@ -230,7 +235,7 @@ export default function Agents() {
 
       <NewAgentForm
         repos={repos}
-        claudeConfigured={claudeConfigured}
+        claudeConfigured={canCreateAgents}
       />
 
       {/* Agent History */}

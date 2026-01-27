@@ -215,63 +215,37 @@ esac
 }
 
 /**
- * Validates that an API key doesn't contain newlines or other dangerous characters.
+ * Configures Claude Code MCP servers.
+ *
+ * Security: Credentials are NOT written to disk here. The pty-server
+ * will fetch credentials at startup and pass them via environment variables.
+ * The MCP config uses $GITHUB_PERSONAL_ACCESS_TOKEN which will be set by pty-server.
+ *
+ * Note: Figma requires the token in the args, so we check a flag that pty-server
+ * will use to know whether to include Figma MCP.
  */
-function validateApiKey(value, fieldName) {
-  if (!value || typeof value !== 'string') {
-    return null
-  }
-  // API keys should be alphanumeric with hyphens, underscores, dots
-  // Reject newlines or other control characters that could inject env lines
-  if (/[\n\r\x00-\x1f]/.test(value)) {
-    throw new Error(`Invalid ${fieldName}: contains control characters`)
-  }
-  return value
-}
-
-function configureClaudeCode(credentials) {
-  const { claudeApiKey, codexApiKey, figmaApiKey, githubToken } = credentials
-
-  // Validate API keys to prevent environment injection
-  const safeClaudeApiKey = validateApiKey(claudeApiKey, 'claudeApiKey')
-  const safeCodexApiKey = validateApiKey(codexApiKey, 'codexApiKey')
-
-  // Write API keys to pty-server env file (overwrite, not append, to prevent duplicates)
-  let envContent = ''
-  if (safeClaudeApiKey) {
-    envContent += `ANTHROPIC_API_KEY=${safeClaudeApiKey}\n`
-  }
-  if (safeCodexApiKey) {
-    envContent += `OPENAI_API_KEY=${safeCodexApiKey}\n`
-  }
-  writeFileSync('/etc/default/pty-server', envContent, { mode: 0o600 })
-
+function configureClaudeCode(hasFigma) {
   // Build MCP config for Claude (goes in ~/.claude.json)
+  // Note: MCP servers inherit environment from the parent process (claude CLI).
+  // pty-server injects GITHUB_PERSONAL_ACCESS_TOKEN into claude's environment,
+  // which MCP servers will automatically inherit. No explicit env config needed.
   const mcpServers = {
     github: {
       command: 'npx',
       args: ['-y', '@modelcontextprotocol/server-github'],
-      env: {
-        GITHUB_PERSONAL_ACCESS_TOKEN: githubToken,
-      },
+      // No env needed - MCP servers inherit GITHUB_PERSONAL_ACCESS_TOKEN from Claude's environment
     },
     shopify: {
       command: 'npx',
-      args: ['-y', '@anthropics/shopify-mcp-server'],
-      env: {},
+      args: [
+        '-y',
+        '@shopify/dev-mcp@latest'
+      ]
     },
   }
 
-  // Add Figma MCP server only if token is provided
-  if (figmaApiKey) {
-    mcpServers.figma = {
-      command: 'npx',
-      args: ['-y', 'figma-mcp-server'],
-      env: {
-        FIGMA_ACCESS_TOKEN: figmaApiKey,
-      },
-    }
-  }
+  // Note: Figma MCP server is added dynamically by pty-server if figmaApiKey is available
+  // because it requires the token in args, not env
 
   const claudeConfig = { mcpServers }
 
@@ -281,7 +255,7 @@ function configureClaudeCode(credentials) {
 
   log('info', 'Claude Code configured with MCP servers', {
     servers: Object.keys(mcpServers),
-    hasFigma: !!figmaApiKey,
+    hasFigma,
   })
 }
 
@@ -304,19 +278,18 @@ async function main() {
   try {
     const credentials = await fetchCredentials()
 
-    configureClaudeCode(credentials)
+    // Configure Claude Code MCP servers (credentials are NOT written to disk)
+    // pty-server will fetch credentials and inject them via environment variables
+    configureClaudeCode(!!credentials.figmaApiKey)
 
     const repoDir = await cloneRepository(credentials)
 
     // Write state files to systemd StateDirectory (shared with pty-server)
     // This directory is created by systemd with correct ownership
-    // Use mode 0o600 to protect credentials from other users
+    // Note: Only non-sensitive metadata is stored, NOT API keys or tokens
     writeFileSync(join(STATE_DIR, 'repo-dir'), repoDir, { mode: 0o600 })
-    writeFileSync(join(STATE_DIR, 'credentials'), JSON.stringify({
-      needsResume: credentials.needsResume,
-      issueNumber: credentials.issueNumber,
-      instructions: credentials.instructions,
-    }), { mode: 0o600 })
+    // Note: needsResume and other metadata are fetched by pty-server from credentials endpoint
+    // No credentials file is written to disk
 
     // Create marker file to indicate bootstrap completed successfully
     // This prevents re-running via systemd ConditionPathExists

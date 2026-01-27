@@ -37,10 +37,16 @@ steps:
       - --platform
       - managed
       - --allow-unauthenticated
+      # VPC connector for reaching VM internal IPs (see docs/VPC-SETUP.md)
+      - --vpc-connector
+      - projects/multitool-workflow-web/locations/eu-west3/connectors/cloud-run-connector
+      - --vpc-egress
+      - private-ranges-only
       - --set-env-vars
       # NOTE: APP_URL must be set to your Cloud Run service URL (e.g., https://multitool-workflow-web-xxxxx-uc.a.run.app)
       # After first deployment, update this value with the actual service URL
-      - 'NODE_ENV=production,APP_URL=https://multitool-workflow-web-uc.a.run.app'
+      # REAPER_AUDIENCE and SCHEDULER_SERVICE_ACCOUNT_EMAIL are required for the reaper endpoint
+      - 'NODE_ENV=production,APP_URL=https://multitool-workflow-web-uc.a.run.app,REAPER_AUDIENCE=https://multitool-workflow-web-uc.a.run.app,SCHEDULER_SERVICE_ACCOUNT_EMAIL=scheduler-invoker@multitool-workflow-web.iam.gserviceaccount.com'
       - --set-secrets
       - 'GITHUB_CLIENT_ID=github-client-id:latest,GITHUB_CLIENT_SECRET=github-client-secret:latest,SESSION_SECRET=session-secret:latest'
       - --memory
@@ -52,9 +58,11 @@ steps:
       - --max-instances
       - '10'
       - --timeout
-      - 60s
+      # 1 hour timeout for long-lived WebSocket connections
+      - 3600s
       - --concurrency
-      - '80'
+      # Lower concurrency to avoid CPU starvation with long-lived WebSocket connections
+      - '50'
 
 # Store images in Container Registry
 images:

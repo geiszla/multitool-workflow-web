@@ -7,6 +7,16 @@
  * Two-stage timeout:
  * 1. Running -> Suspended after 15 minutes of inactivity
  * 2. Suspended -> Stopped after 1 hour of inactivity
+ *
+ * IMPORTANT: The reaper only suspends/stops VMs, it never deletes them.
+ * Deletion is a user-initiated action via the UI.
+ *
+ * Required Firestore composite index:
+ *   Collection: agents
+ *   Fields: status ASC, lastHeartbeatAt ASC
+ *
+ * Deploy indexes: firebase deploy --only firestore:indexes
+ * Or create manually in Firebase Console.
  */
 
 import type { Agent } from '~/models/agent.server'
@@ -176,10 +186,61 @@ async function processInBatches<T, R>(
 }
 
 /**
+ * Queries agents with pagination support.
+ * Fetches all matching agents across multiple pages.
+ *
+ * @param db - Firestore instance
+ * @param status - Agent status to query
+ * @param cutoff - Timestamp cutoff for lastHeartbeatAt
+ * @returns Array of matching agents
+ */
+async function queryAgentsWithPagination(
+  db: FirebaseFirestore.Firestore,
+  status: string,
+  cutoff: Timestamp,
+): Promise<Array<Agent & { id: string }>> {
+  const agents: Array<Agent & { id: string }> = []
+  let lastDoc: FirebaseFirestore.QueryDocumentSnapshot | null = null
+
+  // Paginate through all matching documents
+  while (true) {
+    let query = db.collection('agents')
+      .where('status', '==', status)
+      .where('lastHeartbeatAt', '<', cutoff)
+      .orderBy('lastHeartbeatAt', 'asc')
+      .limit(PAGE_SIZE)
+
+    if (lastDoc) {
+      query = query.startAfter(lastDoc)
+    }
+
+    const snapshot = await query.get()
+
+    if (snapshot.empty) {
+      break
+    }
+
+    for (const doc of snapshot.docs) {
+      agents.push({ ...doc.data() as Agent, id: doc.id })
+    }
+
+    // If we got fewer than PAGE_SIZE, we're done
+    if (snapshot.docs.length < PAGE_SIZE) {
+      break
+    }
+
+    lastDoc = snapshot.docs[snapshot.docs.length - 1]
+  }
+
+  return agents
+}
+
+/**
  * Runs the VM reaper.
  *
  * Queries for inactive agents and suspends/stops their VMs.
  * Uses a distributed lock to prevent concurrent runs.
+ * Supports pagination to handle more than PAGE_SIZE agents.
  *
  * @returns Reaper result
  */
@@ -199,31 +260,22 @@ export async function runReaper(): Promise<ReaperResult> {
     const stopCutoff = Timestamp.fromMillis(now.toMillis() - STOP_AFTER_MS)
     const graceCutoff = Timestamp.fromMillis(now.toMillis() - GRACE_PERIOD_MS)
 
-    // Query running agents past suspend threshold
+    // Query running agents past suspend threshold with pagination
     // Note: Requires composite index on (status, lastHeartbeatAt)
-    const runningQuery = await db.collection('agents')
-      .where('status', '==', 'running')
-      .where('lastHeartbeatAt', '<', suspendCutoff)
-      .limit(PAGE_SIZE)
-      .get()
+    const runningAgents = await queryAgentsWithPagination(db, 'running', suspendCutoff)
 
-    // Query suspended agents past stop threshold
+    // Query suspended agents past stop threshold with pagination
     // Note: Requires composite index on (status, lastHeartbeatAt)
-    const suspendedQuery = await db.collection('agents')
-      .where('status', '==', 'suspended')
-      .where('lastHeartbeatAt', '<', stopCutoff)
-      .limit(PAGE_SIZE)
-      .get()
+    const suspendedAgents = await queryAgentsWithPagination(db, 'suspended', stopCutoff)
 
-    const toSuspend = runningQuery.docs
-      .map(d => ({ ...d.data() as Agent, id: d.id }))
+    const toSuspend = runningAgents
       // Exclude recently started agents (grace period)
       .filter((agent) => {
         const startedAt = agent.startedAt?.toMillis() ?? 0
         return startedAt < graceCutoff.toMillis()
       })
 
-    const toStop = suspendedQuery.docs.map(d => ({ ...d.data() as Agent, id: d.id }))
+    const toStop = suspendedAgents
 
     // eslint-disable-next-line no-console
     console.log(`Reaper: Found ${toSuspend.length} agents to suspend, ${toStop.length} agents to stop`)

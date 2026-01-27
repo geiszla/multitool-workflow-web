@@ -9,7 +9,7 @@ Type=simple
 User=agent
 WorkingDirectory=/opt/vm-agent
 EnvironmentFile=/etc/default/agent-env
-EnvironmentFile=/etc/default/pty-server
+# Note: Credentials are fetched from Cloud Run at startup, not from EnvironmentFile
 ExecStart=/usr/bin/node pty-server.js
 Restart=on-failure
 RestartSec=5

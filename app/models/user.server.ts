@@ -103,7 +103,6 @@ export async function upsertUser(input: UpsertUserInput): Promise<string> {
     return newUserId
   }
 
-  // Create new user with UUID
   const newUserId = crypto.randomUUID()
   const user: User = {
     id: newUserId,

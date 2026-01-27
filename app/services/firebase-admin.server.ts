@@ -2,12 +2,21 @@
  * Firebase Admin Service.
  *
  * Generates custom Firebase tokens for authenticated users.
- * Uses Google Auth Library instead of firebase-admin for simpler dependency management.
+ * Uses Google IAM Credentials API for signing, which works reliably in Cloud Run.
  *
  * Security:
  * - Only generates tokens for authenticated users
  * - Token UID matches internal user ID
- * - Uses service account for signing
+ * - Uses service account for signing via IAM API
+ *
+ * Required IAM Permission:
+ * The Cloud Run service account needs `iam.serviceAccounts.signJwt` permission
+ * on itself. Grant the "Service Account Token Creator" role:
+ *
+ *   gcloud iam service-accounts add-iam-policy-binding \
+ *     PROJECT_NUMBER-compute@developer.gserviceaccount.com \
+ *     --member="serviceAccount:PROJECT_NUMBER-compute@developer.gserviceaccount.com" \
+ *     --role="roles/iam.serviceAccountTokenCreator"
  */
 
 import { Buffer } from 'node:buffer'
@@ -71,6 +80,10 @@ interface CustomTokenPayload {
  * This token can be used with Firebase client SDK's signInWithCustomToken()
  * to authenticate the user to Firebase and enable Firestore realtime subscriptions.
  *
+ * Uses the IAM Credentials API signJwt method which is purpose-built for this
+ * use case and works reliably in Cloud Run without requiring a service account
+ * key file.
+ *
  * @param uid - User ID (will be the Firebase UID)
  * @param claims - Optional custom claims
  * @returns Custom token string
@@ -93,43 +106,41 @@ export async function createCustomToken(
     claims,
   }
 
-  // Sign the token using the service account
-  const client = await auth.getClient()
+  // Create JWT header and payload
+  const headerBase64 = Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).toString('base64url')
+  const payloadBase64 = Buffer.from(JSON.stringify(payload)).toString('base64url')
+  const signatureInput = `${headerBase64}.${payloadBase64}`
 
-  // For service account credentials, we can sign JWTs directly
-  // For default credentials in Cloud Run, we need to use the IAM API
-  if ('sign' in client) {
-    // IAM credentials API signing
-    const headerBase64 = Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).toString('base64url')
-    const payloadBase64 = Buffer.from(JSON.stringify(payload)).toString('base64url')
-    const signatureInput = `${headerBase64}.${payloadBase64}`
+  // Use IAM Credentials API signJwt endpoint (purpose-built for JWT signing)
+  // This is more reliable than signBlob as it handles the JWT structure correctly
+  const iamUrl = `https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/${saEmail}:signJwt`
 
-    // Use IAM API to sign the token
-    const iamUrl = `https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/${saEmail}:signBlob`
+  const accessToken = await auth.getAccessToken()
+  const response = await fetch(iamUrl, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      payload: signatureInput,
+    }),
+  })
 
-    const accessToken = await auth.getAccessToken()
-    const response = await fetch(iamUrl, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${accessToken}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        payload: Buffer.from(signatureInput).toString('base64'),
-      }),
-    })
-
-    if (!response.ok) {
-      const text = await response.text()
-      throw new Error(`Failed to sign token: ${response.status} ${text}`)
+  if (!response.ok) {
+    const text = await response.text()
+    // Provide helpful error message for common IAM permission issue
+    if (response.status === 403) {
+      throw new Error(
+        `Failed to sign token: ${response.status} ${text}. `
+        + `Ensure the service account has "Service Account Token Creator" role. `
+        + `Run: gcloud iam service-accounts add-iam-policy-binding ${saEmail} `
+        + `--member="serviceAccount:${saEmail}" --role="roles/iam.serviceAccountTokenCreator"`,
+      )
     }
-
-    const data = await response.json() as { signedBlob: string }
-    const signature = Buffer.from(data.signedBlob, 'base64').toString('base64url')
-
-    return `${signatureInput}.${signature}`
+    throw new Error(`Failed to sign token: ${response.status} ${text}`)
   }
 
-  // Fallback: Use JWT client if available
-  throw new Error('Unable to sign custom token: no signing method available')
+  const data = await response.json() as { signedJwt: string }
+  return data.signedJwt
 }

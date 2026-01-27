@@ -14,7 +14,7 @@ import type { Route } from './+types/api.agents.$id.status'
 import type { AgentStatus } from '~/models/agent.server'
 import { Timestamp } from '@google-cloud/firestore'
 import { getAgent, updateAgentStatus } from '~/models/agent.server'
-import { getInstanceStatus } from '~/services/compute.server'
+import { getInstanceStatus, stopInstanceAsync } from '~/services/compute.server'
 import { getFirestore } from '~/services/firestore.server'
 import {
   extractAgentId,
@@ -105,8 +105,9 @@ export async function action({ request, params }: Route.ActionArgs) {
     if (body.status && body.status !== agent.status) {
       // When transitioning to 'running', fetch internalIp from GCE server-side
       // This is a security measure to prevent SSRF attacks
+      // Only attempt if we have both instanceName and instanceZone
       let internalIp: string | undefined
-      if (body.status === 'running' && agent.instanceName) {
+      if (body.status === 'running' && agent.instanceName && agent.instanceZone) {
         try {
           const instanceInfo = await getInstanceStatus(agent.instanceName, agent.instanceZone)
           internalIp = instanceInfo?.internalIp
@@ -126,6 +127,14 @@ export async function action({ request, params }: Route.ActionArgs) {
         cloneError: body.cloneError,
         internalIp, // Server-fetched from GCE, not from VM request
       })
+
+      // When agent exits (stopped/failed), stop the VM asynchronously
+      // This prevents orphaned VMs from running forever
+      if ((body.status === 'stopped' || body.status === 'failed') && agent.instanceName && agent.instanceZone) {
+        // Fire-and-forget: don't wait for VM to stop
+        stopInstanceAsync(agent.instanceName, agent.instanceZone)
+          .catch(err => console.error(`Failed to stop VM for agent ${agentId}:`, err))
+      }
     }
     else {
       // Handle partial updates (e.g., terminalReady, cloneStatus) without status change

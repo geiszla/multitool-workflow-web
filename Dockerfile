@@ -42,7 +42,7 @@ FROM node:24-alpine AS runner
 
 # Don't run as root
 RUN addgroup --system --gid 1001 nodejs
-RUN adduser --system --uid 1001 remix
+RUN adduser --system --uid 1001 multitool-workflow-web
 
 WORKDIR /app
 
@@ -52,12 +52,13 @@ COPY --from=prod-deps /app/node_modules ./node_modules
 # Copy built application
 COPY --from=build /app/build ./build
 COPY --from=build /app/package.json ./package.json
+COPY --from=build /app/server.ts ./server.ts
 
 # Set ownership
-RUN chown -R remix:nodejs /app
+RUN chown -R multitool-workflow-web:nodejs /app
 
 # Switch to non-root user
-USER remix
+USER multitool-workflow-web
 
 # Set production environment
 ENV NODE_ENV=production
@@ -70,5 +71,5 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
   CMD wget --no-verbose --tries=1 --spider http://localhost:8080/healthz || exit 1
 
-# Start the application
-CMD ["node", "node_modules/@react-router/serve/dist/cli.js", "./build/server/index.js"]
+# Start the application with custom server (supports WebSocket terminal proxy)
+CMD ["node", "--import", "tsx", "server.ts"]

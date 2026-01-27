@@ -68,6 +68,15 @@ export interface ListReposOptions {
 }
 
 /**
+ * Paginated result for repository listing.
+ */
+export interface RepoListResult {
+  repos: RepoDto[]
+  hasMore: boolean
+  totalCount?: number
+}
+
+/**
  * Creates an Octokit client with the given access token.
  */
 function createClient(accessToken: string): Octokit {
@@ -148,41 +157,75 @@ async function withRetry<T>(
 /**
  * Lists repositories accessible to the user.
  *
+ * For search queries, fetches all accessible repos and filters locally.
+ * This ensures we find repos from orgs and collaborator access, not just user-owned repos.
+ * GitHub's search API (GET /search/repositories) only searches public repos + repos owned by the user,
+ * missing collaborator repos.
+ *
  * @param accessToken - GitHub access token
  * @param options - Filtering and pagination options
- * @returns List of repositories
+ * @returns Paginated list of repositories with hasMore indicator
  */
 export async function listUserRepos(
   accessToken: string,
   options: ListReposOptions = {},
-): Promise<RepoDto[]> {
+): Promise<RepoListResult> {
   const octokit = createClient(accessToken)
   const { limit = 30, page = 1, sort = 'pushed', direction = 'desc' } = options
 
-  // If search is provided, get user info first then use search API
+  // If search is provided, filter from the full list instead of using search API
+  // This ensures we find repos from orgs and collaborator access, not just user-owned repos
   if (options.search && options.search.trim()) {
-    // Get the authenticated user's login for the search query
-    const { data: user } = await withRetry(() => octokit.users.getAuthenticated())
-    // Search in repos the user has access to using fork:true to include forks
-    const searchQuery = `${options.search.trim()} in:name user:${user.login} fork:true`
+    const searchTerm = options.search.trim().toLowerCase()
 
-    const response = await withRetry(() =>
-      octokit.search.repos({
-        q: searchQuery,
-        per_page: limit,
-        page,
-        sort: 'updated',
-        order: direction,
-      }),
+    // Fetch all accessible repos for search (paginating through all pages)
+    // We need to do this because GitHub search API doesn't include collaborator repos
+    const allRepos: Awaited<ReturnType<typeof octokit.repos.listForAuthenticatedUser>>['data'] = []
+    let searchPage = 1
+    const maxSearchPages = 5 // Limit to 500 repos max for search
+
+    while (searchPage <= maxSearchPages) {
+      const response = await withRetry(() =>
+        octokit.repos.listForAuthenticatedUser({
+          per_page: 100,
+          page: searchPage,
+          sort: 'pushed',
+          direction: 'desc',
+          affiliation: 'owner,collaborator,organization_member',
+        }),
+      )
+
+      allRepos.push(...response.data)
+
+      // If we got fewer than 100, we've reached the end
+      if (response.data.length < 100) {
+        break
+      }
+      searchPage++
+    }
+
+    // Filter by search term in name or full name
+    const filtered = allRepos.filter(repo =>
+      repo.name.toLowerCase().includes(searchTerm)
+      || repo.full_name.toLowerCase().includes(searchTerm),
     )
 
-    return response.data.items.map(repo => ({
-      owner: repo.owner?.login || '',
-      name: repo.name,
-      fullName: repo.full_name,
-      private: repo.private,
-      defaultBranch: repo.default_branch || 'main',
-    }))
+    // Apply pagination to the filtered results
+    const startIndex = (page - 1) * limit
+    const paged = filtered.slice(startIndex, startIndex + limit)
+    const hasMore = startIndex + limit < filtered.length
+
+    return {
+      repos: paged.map(repo => ({
+        owner: repo.owner.login,
+        name: repo.name,
+        fullName: repo.full_name,
+        private: repo.private,
+        defaultBranch: repo.default_branch || 'main',
+      })),
+      hasMore,
+      totalCount: filtered.length,
+    }
   }
 
   // Otherwise, list all repos the user has access to
@@ -196,13 +239,19 @@ export async function listUserRepos(
     }),
   )
 
-  return response.data.map(repo => ({
-    owner: repo.owner.login,
-    name: repo.name,
-    fullName: repo.full_name,
-    private: repo.private,
-    defaultBranch: repo.default_branch || 'main',
-  }))
+  // Check if there are more pages by seeing if we got a full page
+  const hasMore = response.data.length === limit
+
+  return {
+    repos: response.data.map(repo => ({
+      owner: repo.owner.login,
+      name: repo.name,
+      fullName: repo.full_name,
+      private: repo.private,
+      defaultBranch: repo.default_branch || 'main',
+    })),
+    hasMore,
+  }
 }
 
 /**

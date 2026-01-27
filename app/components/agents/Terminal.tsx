@@ -2,11 +2,12 @@
  * Terminal Component.
  *
  * Renders an xterm.js terminal that connects to the agent VM via WebSocket.
- * Handles connection state, reconnection, and activity tracking.
+ * Handles connection state, reconnection, session takeover, and activity tracking.
  */
 
-import { Loader, Text } from '@mantine/core'
-import { IconAlertCircle, IconPlugConnected, IconRefresh } from '@tabler/icons-react'
+import type { RefObject } from 'react'
+import { Button, Loader, Text } from '@mantine/core'
+import { IconAlertCircle, IconPlugConnected, IconRefresh, IconUsers } from '@tabler/icons-react'
 import { useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react'
 import './Terminal.css'
 
@@ -17,25 +18,19 @@ import '@xterm/xterm/css/xterm.css'
  * WebSocket message types (must match server protocol).
  */
 interface WsMessage {
-  type: 'stdin' | 'stdout' | 'resize' | 'ping' | 'pong' | 'error' | 'exit'
+  type: 'stdin' | 'stdout' | 'resize' | 'error' | 'exit' | 'connected' | 'session_active' | 'session_taken_over' | 'takeover'
   data?: string
   cols?: number
   rows?: number
   code?: number
   message?: string
+  sessionId?: string
 }
 
 /**
  * Connection state.
  */
-type ConnectionState = 'connecting' | 'connected' | 'disconnected' | 'error'
-
-/**
- * Terminal component props.
- */
-interface TerminalProps {
-  agentId: string
-}
+type ConnectionState = 'connecting' | 'resuming' | 'connected' | 'disconnected' | 'error' | 'session_conflict'
 
 /**
  * Imperative handle for Terminal component.
@@ -43,12 +38,24 @@ interface TerminalProps {
 export interface TerminalHandle {
   sendInput: (text: string) => void
   isConnected: () => boolean
+  disconnect: () => void
+}
+
+/**
+ * Terminal component props.
+ */
+interface TerminalProps {
+  agentId: string
+  ref?: RefObject<TerminalHandle | null>
+  /** Current agent status - used to detect suspended state for auto-resume */
+  agentStatus?: string
 }
 
 /**
  * Terminal component using xterm.js.
+ * Uses ref prop pattern (React 19) to expose imperative handle to parent.
  */
-export function Terminal({ ref, agentId }: TerminalProps & { ref?: React.RefObject<TerminalHandle | null> }) {
+export function Terminal({ ref, agentId, agentStatus }: TerminalProps) {
   const terminalRef = useRef<HTMLDivElement>(null)
   const xtermRef = useRef<import('@xterm/xterm').Terminal | null>(null)
   const fitAddonRef = useRef<import('@xterm/addon-fit').FitAddon | null>(null)
@@ -58,6 +65,7 @@ export function Terminal({ ref, agentId }: TerminalProps & { ref?: React.RefObje
 
   const [connectionState, setConnectionState] = useState<ConnectionState>('connecting')
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
 
   // Expose imperative handle for parent components
   useImperativeHandle(ref, () => ({
@@ -68,6 +76,16 @@ export function Terminal({ ref, agentId }: TerminalProps & { ref?: React.RefObje
       }
     },
     isConnected: () => connectionState === 'connected',
+    disconnect: () => {
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current)
+        reconnectTimeoutRef.current = null
+      }
+      if (wsRef.current) {
+        wsRef.current.close(1000, 'Inactivity disconnect')
+        wsRef.current = null
+      }
+    },
   }), [connectionState])
 
   /**
@@ -140,15 +158,60 @@ export function Terminal({ ref, agentId }: TerminalProps & { ref?: React.RefObje
   }, [])
 
   /**
-   * Connect to WebSocket.
+   * Resume a suspended agent.
+   * Returns true if resume was successful, false otherwise.
    */
-  const connect = useCallback(() => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
+  const resumeAgent = useCallback(async (): Promise<boolean> => {
+    try {
+      const response = await fetch(`/api/agents/${agentId}/resume`, {
+        method: 'POST',
+      })
+      if (response.ok) {
+        return true
+      }
+      const data = await response.json()
+      console.warn('Failed to resume agent:', data.error)
+      return false
+    }
+    catch (error) {
+      console.error('Error resuming agent:', error)
+      return false
+    }
+  }, [agentId])
+
+  /**
+   * Connect to WebSocket.
+   * If agent is suspended, attempts to resume first.
+   */
+  const connect = useCallback(async () => {
+    // Don't connect if already open OR connecting
+    // This prevents duplicate connections during retry/reconnect scenarios
+    if (wsRef.current?.readyState === WebSocket.OPEN
+      || wsRef.current?.readyState === WebSocket.CONNECTING) {
       return
+    }
+
+    // If agent is suspended or stopped, try to resume/start first
+    if (agentStatus === 'suspended' || agentStatus === 'stopped') {
+      setConnectionState('resuming')
+      setErrorMessage(null)
+      setActiveSessionId(null)
+
+      const resumed = await resumeAgent()
+      if (!resumed) {
+        setConnectionState('error')
+        setErrorMessage(`Failed to ${agentStatus === 'stopped' ? 'start' : 'resume'} agent`)
+        return
+      }
+      // Give the VM a moment to come back online
+      // Stopped VMs take longer to start than suspended ones
+      const waitTime = agentStatus === 'stopped' ? 5000 : 2000
+      await new Promise(resolve => setTimeout(resolve, waitTime))
     }
 
     setConnectionState('connecting')
     setErrorMessage(null)
+    setActiveSessionId(null)
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const wsUrl = `${protocol}//${window.location.host}/api/agents/${agentId}/terminal`
@@ -157,16 +220,8 @@ export function Terminal({ ref, agentId }: TerminalProps & { ref?: React.RefObje
     wsRef.current = ws
 
     ws.onopen = () => {
-      setConnectionState('connected')
+      // Wait for 'connected' or 'session_active' message to set state
       reconnectAttemptRef.current = 0
-
-      // Send initial resize
-      if (xtermRef.current && fitAddonRef.current) {
-        fitAddonRef.current.fit()
-        const { cols, rows } = xtermRef.current
-        const message: WsMessage = { type: 'resize', cols, rows }
-        ws.send(JSON.stringify(message))
-      }
     }
 
     ws.onmessage = (event) => {
@@ -174,6 +229,31 @@ export function Terminal({ ref, agentId }: TerminalProps & { ref?: React.RefObje
         const msg = JSON.parse(event.data) as WsMessage
 
         switch (msg.type) {
+          case 'connected':
+            // Successfully connected (either fresh or after takeover)
+            setConnectionState('connected')
+            setActiveSessionId(null)
+            // Send initial resize
+            if (xtermRef.current && fitAddonRef.current) {
+              fitAddonRef.current.fit()
+              const { cols, rows } = xtermRef.current
+              const resizeMsg: WsMessage = { type: 'resize', cols, rows }
+              ws.send(JSON.stringify(resizeMsg))
+            }
+            break
+
+          case 'session_active':
+            // Another session is active - show takeover UI
+            setConnectionState('session_conflict')
+            setActiveSessionId(msg.sessionId || null)
+            break
+
+          case 'session_taken_over':
+            // Our session was taken over by another client
+            setConnectionState('error')
+            setErrorMessage('Session was taken over by another browser/tab.')
+            break
+
           case 'stdout':
             if (msg.data && xtermRef.current) {
               xtermRef.current.write(msg.data)
@@ -188,10 +268,6 @@ export function Terminal({ ref, agentId }: TerminalProps & { ref?: React.RefObje
           case 'exit':
             xtermRef.current?.write(`\r\n\x1B[33mProcess exited with code ${msg.code}\x1B[0m\r\n`)
             break
-
-          case 'pong':
-            // Health check response
-            break
         }
       }
       catch (error) {
@@ -200,7 +276,6 @@ export function Terminal({ ref, agentId }: TerminalProps & { ref?: React.RefObje
     }
 
     ws.onclose = (event) => {
-      setConnectionState('disconnected')
       wsRef.current = null
 
       // Don't auto-reconnect on:
@@ -209,8 +284,10 @@ export function Terminal({ ref, agentId }: TerminalProps & { ref?: React.RefObje
       // - 4001: Unauthorized (auth error)
       // - 4003: Forbidden (authorization error)
       // - 4004: Not found (agent doesn't exist)
-      const noRetryCodes = [1000, 1008, 4001, 4003, 4004]
+      // - 4409: Session taken over (don't auto-reconnect, user needs to decide)
+      const noRetryCodes = [1000, 1008, 4001, 4003, 4004, 4409]
       if (noRetryCodes.includes(event.code)) {
+        setConnectionState('disconnected')
         // Set specific error message for auth-related codes
         if (event.code === 4001) {
           setErrorMessage('Authentication failed. Please refresh the page to log in again.')
@@ -221,8 +298,13 @@ export function Terminal({ ref, agentId }: TerminalProps & { ref?: React.RefObje
         else if (event.code === 4004) {
           setErrorMessage('Agent not found.')
         }
+        else if (event.code === 4409) {
+          setErrorMessage('Session was taken over by another browser/tab.')
+        }
         return
       }
+
+      setConnectionState('disconnected')
 
       // Exponential backoff for reconnection
       const attempt = reconnectAttemptRef.current
@@ -241,7 +323,7 @@ export function Terminal({ ref, agentId }: TerminalProps & { ref?: React.RefObje
       setErrorMessage('Connection error')
       setConnectionState('error')
     }
-  }, [agentId])
+  }, [agentId, agentStatus, resumeAgent])
 
   /**
    * Disconnect from WebSocket.
@@ -259,6 +341,16 @@ export function Terminal({ ref, agentId }: TerminalProps & { ref?: React.RefObje
   }, [])
 
   /**
+   * Request session takeover.
+   */
+  const requestTakeover = useCallback(() => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      const message: WsMessage = { type: 'takeover' }
+      wsRef.current.send(JSON.stringify(message))
+    }
+  }, [])
+
+  /**
    * Handle window resize.
    */
   useEffect(() => {
@@ -272,18 +364,9 @@ export function Terminal({ ref, agentId }: TerminalProps & { ref?: React.RefObje
     return () => window.removeEventListener('resize', handleResize)
   }, [])
 
-  /**
-   * Ping health check (every 30 seconds).
-   */
-  useEffect(() => {
-    const pingInterval = setInterval(() => {
-      if (wsRef.current?.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify({ type: 'ping' }))
-      }
-    }, 30000)
-
-    return () => clearInterval(pingInterval)
-  }, [])
+  // Note: App-level ping/pong removed. WebSocket protocol-level ping/pong
+  // (handled by ws library) is sufficient for connection health checks.
+  // Server-side heartbeat tracking is done based on stdin/stdout messages.
 
   /**
    * Initialize terminal and connect on mount.
@@ -317,6 +400,20 @@ export function Terminal({ ref, agentId }: TerminalProps & { ref?: React.RefObje
 
       {connectionState !== 'connected' && (
         <div className="terminal-overlay">
+          {connectionState === 'resuming' && (
+            <>
+              <Loader color="green" size="lg" />
+              <Text className="terminal-overlay-text">
+                {agentStatus === 'stopped' ? 'Starting VM...' : 'Resuming VM...'}
+              </Text>
+              <Text size="sm" c="dimmed" ta="center" mt="xs">
+                {agentStatus === 'stopped'
+                  ? 'The stopped VM is being started. This may take a minute.'
+                  : 'The suspended VM is being resumed. This may take a moment.'}
+              </Text>
+            </>
+          )}
+
           {connectionState === 'connecting' && (
             <>
               <Loader color="blue" size="lg" />
@@ -324,10 +421,38 @@ export function Terminal({ ref, agentId }: TerminalProps & { ref?: React.RefObje
             </>
           )}
 
+          {connectionState === 'session_conflict' && (
+            <>
+              <IconUsers size={48} color="#ffa94d" />
+              <Text className="terminal-overlay-text">
+                Another session is active
+              </Text>
+              <Text size="sm" c="dimmed" ta="center" mt="xs">
+                {activeSessionId && `Session: ${activeSessionId.slice(0, 20)}...`}
+              </Text>
+              <Button
+                variant="filled"
+                color="orange"
+                onClick={requestTakeover}
+                mt="md"
+              >
+                Take Over Session
+              </Button>
+              <Text size="xs" c="dimmed" ta="center" mt="sm" maw={300}>
+                The other session will be disconnected. Any unsaved work in the other browser tab will continue in the background.
+              </Text>
+            </>
+          )}
+
           {connectionState === 'disconnected' && (
             <>
               <IconPlugConnected size={48} color="#888" />
               <Text className="terminal-overlay-text">Disconnected</Text>
+              {errorMessage && (
+                <Text size="sm" c="red" ta="center" mt="xs">
+                  {errorMessage}
+                </Text>
+              )}
               <button
                 type="button"
                 className="terminal-reconnect-button"

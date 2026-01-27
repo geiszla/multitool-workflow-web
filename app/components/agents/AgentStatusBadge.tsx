@@ -1,7 +1,6 @@
 import type { AgentStatus } from '~/models/agent.server'
 import { Badge } from '@mantine/core'
 import {
-  IconCheck,
   IconCircleDot,
   IconLoader,
   IconPlayerPause,
@@ -51,21 +50,13 @@ const STATUS_CONFIG: Record<AgentStatus, {
     label: 'Stopped',
     icon: <IconPlayerStop size={12} />,
   },
-  completed: {
-    color: 'teal',
-    label: 'Completed',
-    icon: <IconCheck size={12} />,
-  },
   failed: {
     color: 'red',
     label: 'Failed',
     icon: <IconX size={12} />,
   },
-  cancelled: {
-    color: 'gray',
-    label: 'Cancelled',
-    icon: <IconX size={12} />,
-  },
+  // Note: 'cancelled' and 'completed' statuses removed - agents are now deleted directly
+  // or transition to 'stopped' on normal exit
 }
 
 export function AgentStatusBadge({ status, size = 'sm' }: AgentStatusBadgeProps) {

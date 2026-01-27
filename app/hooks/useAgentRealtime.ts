@@ -6,31 +6,24 @@
  */
 
 import type { Timestamp } from 'firebase/firestore'
+import type { AnyAgentStatus } from '~/utils/agent-status'
 import { useCallback, useEffect, useState } from 'react'
 import { useFirebaseAuth } from './useFirebaseAuth'
 
-/**
- * Agent status values (matches server model).
- */
-export type AgentStatus
-  = | 'pending'
-    | 'provisioning'
-    | 'running'
-    | 'suspended'
-    | 'stopped'
-    | 'completed'
-    | 'failed'
-    | 'cancelled'
+// Re-export types from shared utility
+export type { AgentStatus, AnyAgentStatus, LegacyAgentStatus } from '~/utils/agent-status'
+export { getValidTransitions, isActiveStatus, isTerminalStatus } from '~/utils/agent-status'
 
 /**
  * Agent data from Firestore realtime subscription.
  * Only includes fields that clients can read (excludes internalIp).
+ * Uses AnyAgentStatus to support legacy status values from old data.
  */
 export interface RealtimeAgent {
   id: string
   userId: string
   title: string
-  status: AgentStatus
+  status: AnyAgentStatus
   statusVersion: number
 
   // Target configuration
@@ -47,7 +40,6 @@ export interface RealtimeAgent {
   startedAt?: Timestamp
   suspendedAt?: Timestamp
   stoppedAt?: Timestamp
-  completedAt?: Timestamp
   errorMessage?: string
 
   // Instance info (excludes internalIp for security)
@@ -57,7 +49,6 @@ export interface RealtimeAgent {
 
   // Terminal state
   terminalReady?: boolean
-  lastActivity?: Timestamp
 
   // Clone status
   cloneStatus?: 'pending' | 'cloning' | 'completed' | 'failed'
@@ -163,20 +154,13 @@ export function useAgentRealtime(agentId: string): UseAgentRealtimeResult {
 /**
  * Checks if agent status is active (requires terminal connection).
  */
-export function isAgentActive(status: AgentStatus): boolean {
+export function isAgentActive(status: AnyAgentStatus): boolean {
   return ['running'].includes(status)
-}
-
-/**
- * Checks if agent status is terminal (no further transitions).
- */
-export function isAgentTerminal(status: AgentStatus): boolean {
-  return ['completed', 'failed', 'cancelled'].includes(status)
 }
 
 /**
  * Checks if agent can be resumed.
  */
-export function canResumeAgent(status: AgentStatus): boolean {
+export function canResumeAgent(status: AnyAgentStatus): boolean {
   return ['suspended', 'stopped'].includes(status)
 }

@@ -524,6 +524,34 @@ export async function stopInstance(
 }
 
 /**
+ * Stops an instance without waiting for completion.
+ * Used for non-blocking VM shutdown (e.g., after agent exit).
+ *
+ * @param instanceName - Instance name
+ * @param zone - GCE zone
+ */
+export async function stopInstanceAsync(
+  instanceName: string,
+  zone = DEFAULT_ZONE,
+): Promise<void> {
+  const client = getInstancesClient()
+
+  try {
+    await client.stop({
+      project: GCP_PROJECT_ID,
+      zone,
+      instance: instanceName,
+    })
+    // eslint-disable-next-line no-console
+    console.log(`Initiated async stop for instance ${instanceName}`)
+  }
+  catch (error) {
+    // Log but don't throw - this is fire-and-forget
+    console.error(`Failed to initiate stop for ${instanceName}:`, error)
+  }
+}
+
+/**
  * Suspends an instance (preserves memory state, quick resume).
  *
  * @param instanceName - Instance name
@@ -572,6 +600,11 @@ export async function resumeInstance(
 /**
  * Deletes an instance.
  *
+ * Treats 404 (instance not found) as success - the VM is already gone.
+ * This makes the operation idempotent and handles cases where:
+ * - VM was already deleted externally
+ * - Retry after partial failure
+ *
  * @param instanceName - Instance name
  * @param zone - GCE zone
  */
@@ -581,14 +614,25 @@ export async function deleteInstance(
 ): Promise<void> {
   const client = getInstancesClient()
 
-  const [operation] = await client.delete({
-    project: GCP_PROJECT_ID,
-    zone,
-    instance: instanceName,
-  })
+  try {
+    const [operation] = await client.delete({
+      project: GCP_PROJECT_ID,
+      zone,
+      instance: instanceName,
+    })
 
-  if (operation.name) {
-    await waitForOperation(operation.name, zone)
+    if (operation.name) {
+      await waitForOperation(operation.name, zone)
+    }
+  }
+  catch (error) {
+    // Treat 404 as success - VM is already gone
+    if ((error as { code?: number }).code === 404) {
+      // eslint-disable-next-line no-console
+      console.log(`Instance ${instanceName} not found (404), treating as already deleted`)
+      return
+    }
+    throw error
   }
 }
 

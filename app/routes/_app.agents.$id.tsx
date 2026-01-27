@@ -25,11 +25,9 @@ import {
   IconPlayerPlay,
   IconPlayerStop,
   IconShare,
-  IconTerminal2,
   IconTrash,
-  IconX,
 } from '@tabler/icons-react'
-import { useCallback, useRef, useState } from 'react'
+import { useRef, useState } from 'react'
 import { redirect, useFetcher, useLoaderData, useNavigate } from 'react-router'
 import { AgentStatusBadge } from '~/components/agents/AgentStatusBadge'
 import { FinishModal } from '~/components/agents/FinishModal'
@@ -41,8 +39,7 @@ import {
   deleteAgent,
   getAgentSharedWith,
   getAgentWithAccess,
-  getValidTransitions,
-  isActiveStatus,
+  getValidTransitions as getValidTransitionsServer,
   isAgentOwner,
   shareAgent,
   unshareAgent,
@@ -57,6 +54,7 @@ import {
   suspendInstance,
 } from '~/services/compute.server'
 import { requireUser } from '~/services/session.server'
+import { getValidTransitions as getValidTransitionsClient } from '~/utils/agent-status'
 
 export function meta({ data }: Route.MetaArgs) {
   const title = data?.agent?.title || 'Agent'
@@ -82,7 +80,6 @@ interface LoaderData {
     startedAt?: string
     suspendedAt?: string
     stoppedAt?: string
-    completedAt?: string
     instanceName?: string
     instanceZone?: string
     instanceStatus?: string
@@ -92,8 +89,6 @@ interface LoaderData {
     needsResume?: boolean
     ownerGithubLogin: string
   }
-  validActions: AgentStatus[]
-  isActive: boolean
   isOwner: boolean
   sharedUsers: Array<Pick<User, 'id' | 'githubLogin' | 'avatarUrl'>>
 }
@@ -138,7 +133,6 @@ export async function loader({ request, params }: Route.LoaderArgs): Promise<Loa
         startedAt: agent.startedAt?.toDate().toISOString(),
         suspendedAt: agent.suspendedAt?.toDate().toISOString(),
         stoppedAt: agent.stoppedAt?.toDate().toISOString(),
-        completedAt: agent.completedAt?.toDate().toISOString(),
         instanceName: agent.instanceName,
         instanceZone: agent.instanceZone,
         instanceStatus: agent.instanceStatus,
@@ -148,8 +142,6 @@ export async function loader({ request, params }: Route.LoaderArgs): Promise<Loa
         needsResume: agent.needsResume,
         ownerGithubLogin: agent.ownerGithubLogin,
       },
-      validActions: getValidTransitions(agent.status),
-      isActive: isActiveStatus(agent.status),
       isOwner,
       sharedUsers,
     }
@@ -184,7 +176,7 @@ export async function action({ request, params }: Route.ActionArgs): Promise<Act
     // Use getAgentWithAccess to support shared users
     const agent = await getAgentWithAccess(agentId, user.id)
     const isOwner = isAgentOwner(agent, user.id)
-    const validTransitions = getValidTransitions(agent.status)
+    const validTransitions = getValidTransitionsServer(agent.status)
 
     // Handle sharing actions (owner only)
     if (intent === 'share') {
@@ -246,23 +238,27 @@ export async function action({ request, params }: Route.ActionArgs): Promise<Act
     }
 
     // Handle delete action (owner only)
+    // IMPORTANT: Delete VM first, only update Firestore if VM delete succeeds
+    // This prevents orphaned VMs that would run forever (cost leak)
     if (intent === 'delete') {
       if (!isOwner) {
         return { error: 'Only the owner can delete this agent' }
       }
 
-      // Delete VM if it exists
+      // Delete VM first if it exists
       if (agent.instanceName && agent.instanceZone) {
         try {
           await deleteInstance(agent.instanceName, agent.instanceZone)
         }
         catch (error) {
-          console.error('Failed to delete VM:', error instanceof Error ? error.message : 'Unknown error')
-          // Continue with Firestore deletion even if VM deletion fails
+          const message = error instanceof Error ? error.message : 'Unknown error'
+          console.error('Failed to delete VM:', message)
+          // Do NOT delete from Firestore if VM deletion fails - prevents orphaned VMs
+          return { error: `Failed to delete VM: ${message}. Agent not deleted.` }
         }
       }
 
-      // Delete agent from Firestore
+      // VM deleted successfully (or didn't exist), now delete from Firestore
       await deleteAgent(agentId)
 
       // Redirect to agents list
@@ -270,8 +266,8 @@ export async function action({ request, params }: Route.ActionArgs): Promise<Act
     }
 
     // Map intent to target status
+    // Note: 'cancel' is removed - use 'delete' action instead (which removes the doc entirely)
     const statusMap: Record<string, AgentStatus> = {
-      cancel: 'cancelled',
       suspend: 'suspended',
       stop: 'stopped',
       resume: 'running',
@@ -312,8 +308,17 @@ export async function action({ request, params }: Route.ActionArgs): Promise<Act
       }
     }
 
-    // Update agent status
-    const metadata = intent === 'stop' ? { needsResume: true } : undefined
+    // Update agent status with appropriate metadata
+    let metadata: Record<string, unknown> | undefined
+    if (intent === 'stop') {
+      metadata = { needsResume: true }
+    }
+    else if (intent === 'start') {
+      // For stopped -> running transition, clear stale data
+      // internalIp may change after VM restart
+      // terminalReady should be false until pty-server reports ready
+      metadata = { internalIp: null, terminalReady: false }
+    }
     await updateAgentStatus(agentId, agent.status, targetStatus, metadata)
 
     return { success: true }
@@ -362,7 +367,9 @@ export default function AgentView() {
     errorMessage: realtimeAgent?.errorMessage ?? loaderData.agent.errorMessage,
   }
 
-  const validActions = getValidTransitions(agent.status)
+  // Compute validActions from current realtime status using client-safe utility
+  // This ensures buttons update correctly when status changes via realtime
+  const validActions = getValidTransitionsClient(agent.status)
   const isLoading = fetcher.state !== 'idle'
 
   const formatDate = (isoString?: string) => {
@@ -404,32 +411,29 @@ export default function AgentView() {
     setFinishError(undefined)
   }
 
-  // Handlers for inactivity manager
-  const handleInactivitySuspend = useCallback(async () => {
-    fetcher.submit({ intent: 'suspend' }, { method: 'post' })
-  }, [fetcher])
-
-  const handleInactivityStop = useCallback(async () => {
-    fetcher.submit({ intent: 'stop' }, { method: 'post' })
-  }, [fetcher])
-
   // Determine which action buttons to show
-  const canCancel = validActions.includes('cancelled')
+  // Note: Cancel action removed - use Delete instead (which removes the agent entirely)
   const canSuspend = validActions.includes('suspended')
   const canStop = validActions.includes('stopped')
   const canResume = agent.status === 'suspended' && validActions.includes('running')
   const canStart = agent.status === 'stopped' && validActions.includes('running')
-  const canDelete = isOwner && ['completed', 'failed', 'cancelled', 'stopped'].includes(agent.status)
+  // Allow delete on terminal states + stopped + suspended (not running/provisioning)
+  // Suspended VMs should be deletable since they still incur some cost
+  const canDelete = isOwner && ['failed', 'stopped', 'pending', 'suspended'].includes(agent.status)
   const canShare = isOwner
   const canFinish = isOwner && agent.status === 'running' && agent.terminalReady
 
   // Terminal visibility conditions
-  const showTerminal = agent.status === 'running' && agent.terminalReady
+  // Terminal is shown for:
+  // - running + terminalReady: normal operation
+  // - suspended: Terminal handles auto-resume via its resumeAgent callback
+  // - stopped: Terminal handles auto-resume via its resumeAgent callback
+  const showTerminal = (agent.status === 'running' && agent.terminalReady)
+    || agent.status === 'suspended'
+    || agent.status === 'stopped'
   const showProvisioningStatus = ['pending', 'provisioning'].includes(agent.status)
   const showConnectingStatus = agent.status === 'running' && !agent.terminalReady
-  const showSuspendedStatus = agent.status === 'suspended'
-  const showStoppedStatus = agent.status === 'stopped'
-  const showCompletedStatus = agent.status === 'completed'
+  // Note: showSuspendedStatus and showStoppedStatus are removed as Terminal now handles these
   const showFailedStatus = agent.status === 'failed'
 
   return (
@@ -506,18 +510,6 @@ export default function AgentView() {
 
             {/* Action buttons */}
             <Group>
-              {canCancel && (
-                <Button
-                  variant="light"
-                  color="gray"
-                  leftSection={<IconX size={16} />}
-                  onClick={() => handleAction('cancel')}
-                  loading={isLoading}
-                >
-                  Cancel
-                </Button>
-              )}
-
               {canSuspend && (
                 <Button
                   variant="light"
@@ -634,10 +626,9 @@ export default function AgentView() {
               agentId={agent.id}
               isRunning={agent.status === 'running'}
               terminalReady={agent.terminalReady ?? false}
-              onSuspend={handleInactivitySuspend}
-              onStop={handleInactivityStop}
+              terminalRef={terminalRef}
             >
-              <Terminal ref={terminalRef} agentId={agent.id} />
+              <Terminal ref={terminalRef} agentId={agent.id} agentStatus={agent.status} />
             </InactivityManager>
           </div>
         )}
@@ -668,65 +659,7 @@ export default function AgentView() {
           </Stack>
         )}
 
-        {showSuspendedStatus && (
-          <Stack align="center" justify="center" py="xl" h={400}>
-            <IconPlayerPause size={48} color="var(--mantine-color-yellow-6)" />
-            <Title order={4} c="dimmed">
-              Agent Suspended
-            </Title>
-            <Text size="sm" c="dimmed" ta="center">
-              The agent has been suspended due to inactivity.
-              <br />
-              Click Resume to continue.
-            </Text>
-            {canResume && (
-              <Button
-                leftSection={<IconPlayerPlay size={16} />}
-                onClick={() => handleAction('resume')}
-                loading={isLoading}
-                mt="md"
-              >
-                Resume
-              </Button>
-            )}
-          </Stack>
-        )}
-
-        {showStoppedStatus && (
-          <Stack align="center" justify="center" py="xl" h={400}>
-            <IconPlayerStop size={48} color="var(--mantine-color-orange-6)" />
-            <Title order={4} c="dimmed">
-              Agent Stopped
-            </Title>
-            <Text size="sm" c="dimmed" ta="center">
-              The agent has been stopped.
-              <br />
-              Starting will take longer as the VM needs to boot.
-            </Text>
-            {canStart && (
-              <Button
-                leftSection={<IconPlayerPlay size={16} />}
-                onClick={() => handleAction('start')}
-                loading={isLoading}
-                mt="md"
-              >
-                Start
-              </Button>
-            )}
-          </Stack>
-        )}
-
-        {showCompletedStatus && (
-          <Stack align="center" justify="center" py="xl" h={400}>
-            <IconTerminal2 size={48} color="var(--mantine-color-green-6)" />
-            <Title order={4} c="dimmed">
-              Completed
-            </Title>
-            <Text size="sm" c="dimmed" ta="center">
-              The agent has completed its work successfully.
-            </Text>
-          </Stack>
-        )}
+        {/* Note: Suspended and Stopped states are now handled by Terminal's auto-resume */}
 
         {showFailedStatus && (
           <Stack align="center" justify="center" py="xl" h={400}>
@@ -790,15 +723,6 @@ export default function AgentView() {
                 Stopped
               </Text>
               <Text size="sm">{formatDate(agent.stoppedAt)}</Text>
-            </Group>
-          )}
-
-          {agent.completedAt && (
-            <Group justify="space-between">
-              <Text size="sm" c="dimmed">
-                Completed
-              </Text>
-              <Text size="sm">{formatDate(agent.completedAt)}</Text>
             </Group>
           )}
         </Stack>

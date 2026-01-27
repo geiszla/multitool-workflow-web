@@ -11,6 +11,13 @@ import { getFirestore } from '~/services/firestore.server'
 
 /**
  * Agent status values.
+ *
+ * Note: There is no 'cancelled' or 'deleted' status. Deletion is a user-initiated
+ * action that removes the agent document from Firestore entirely (after deleting
+ * the VM). The reaper never deletes VMs - it only suspends/stops.
+ *
+ * Note: 'completed' status was removed. When Claude Code exits normally (exit code 0),
+ * the agent is marked as 'stopped' instead. Non-zero exit codes result in 'failed'.
  */
 export type AgentStatus
   = | 'pending'
@@ -18,23 +25,21 @@ export type AgentStatus
     | 'running'
     | 'suspended'
     | 'stopped'
-    | 'completed'
     | 'failed'
-    | 'cancelled'
 
 /**
  * Valid status transitions.
- * Terminal states (completed, failed, cancelled) have no outgoing transitions.
+ * Terminal state (failed) has no outgoing transitions.
+ * 'stopped' can transition back to 'running' when the VM is started.
+ * Deletion is handled separately (not a status transition).
  */
 const VALID_TRANSITIONS: Record<AgentStatus, AgentStatus[]> = {
   pending: ['provisioning', 'failed'], // Can fail during initial VM creation
   provisioning: ['running', 'failed'],
-  running: ['suspended', 'stopped', 'completed', 'failed', 'cancelled'],
-  suspended: ['running', 'stopped', 'cancelled'], // running = resume
-  stopped: ['running', 'cancelled'], // running = start
-  completed: [],
+  running: ['suspended', 'stopped', 'failed'],
+  suspended: ['running', 'stopped'], // running = resume
+  stopped: ['running'], // running = start
   failed: [],
-  cancelled: [],
 }
 
 /**
@@ -65,7 +70,6 @@ export interface Agent {
   startedAt?: Timestamp
   suspendedAt?: Timestamp // When VM was suspended
   stoppedAt?: Timestamp // When VM was stopped
-  completedAt?: Timestamp
   errorMessage?: string
 
   // Compute Engine instance
@@ -76,7 +80,6 @@ export interface Agent {
   // Part 3: New fields for async provisioning and terminal
   internalIp?: string // VM internal IP (server-side only, not exposed to client)
   terminalPort?: number // WebSocket port (default 8080)
-  lastActivity?: Timestamp // Last user activity
   terminalReady?: boolean // True when PTY server is ready
 
   // Git operation tracking
@@ -85,9 +88,6 @@ export interface Agent {
 
   // Resume tracking
   needsResume?: boolean // True if stopped (not suspended), needs --resume flag
-
-  // Provisioning tracking
-  provisioningOperationId?: string // GCE operation ID for polling
 
   // Server-side heartbeat for reaper
   lastHeartbeatAt?: Timestamp // Server-updated from WebSocket layer
@@ -142,7 +142,6 @@ export interface StatusUpdateMetadata {
   cloneStatus?: 'pending' | 'cloning' | 'completed' | 'failed'
   cloneError?: string
   needsResume?: boolean
-  provisioningOperationId?: string
 }
 
 const AGENTS_COLLECTION = 'agents'
@@ -174,7 +173,7 @@ export async function createAgent(input: CreateAgentInput): Promise<Agent> {
     userId: input.userId,
     ownerGithubLogin: input.ownerGithubLogin,
     title: input.title || generateTitle(input.repoOwner, input.repoName, input.issueNumber),
-    status: 'pending',
+    status: 'pending' as const,
     statusVersion: 1,
     repoOwner: input.repoOwner,
     repoName: input.repoName,
@@ -335,6 +334,7 @@ export async function updateAgentStatus(
     }
 
     const now = Timestamp.now()
+
     const updates: Partial<Agent> = {
       status: toStatus,
       statusVersion: agent.statusVersion + 1,
@@ -356,9 +356,6 @@ export async function updateAgentStatus(
         break
       case 'stopped':
         updates.stoppedAt = now
-        break
-      case 'completed':
-        updates.completedAt = now
         break
     }
 
@@ -408,24 +405,62 @@ export function isActiveStatus(status: AgentStatus): boolean {
 
 /**
  * Gets valid next statuses for a given status.
+ * Handles legacy 'cancelled' status gracefully (returns empty array).
  */
-export function getValidTransitions(status: AgentStatus): AgentStatus[] {
-  return VALID_TRANSITIONS[status]
+export function getValidTransitions(status: AgentStatus | string): AgentStatus[] {
+  // Handle legacy 'cancelled' status from old data
+  if (!(status in VALID_TRANSITIONS)) {
+    return []
+  }
+  return VALID_TRANSITIONS[status as AgentStatus]
 }
 
 /**
- * Updates the lastActivity timestamp for an agent.
+ * Safely marks an agent as failed, respecting the state machine.
  *
- * Called by the browser InactivityManager to track user activity.
- * Uses server timestamp to avoid clock skew issues.
+ * This function uses a transaction to:
+ * 1. Check the current status
+ * 2. Only update to 'failed' if it's a valid transition
+ * 3. Skip if already in a terminal state (completed, failed)
+ *
+ * Used when external events (VM deletion, connection errors) indicate failure.
  *
  * @param agentId - Agent UUID
+ * @param errorMessage - Error message to record
+ * @returns True if status was updated, false if skipped
  */
-export async function updateAgentActivity(agentId: string): Promise<void> {
+export async function markAgentFailed(
+  agentId: string,
+  errorMessage: string,
+): Promise<boolean> {
   const db = getFirestore()
-  await db.collection(AGENTS_COLLECTION).doc(agentId).update({
-    lastActivity: Timestamp.now(),
-    updatedAt: Timestamp.now(),
+  const agentRef = db.collection(AGENTS_COLLECTION).doc(agentId)
+
+  return db.runTransaction(async (tx) => {
+    const doc = await tx.get(agentRef)
+
+    if (!doc.exists) {
+      return false
+    }
+
+    const agent = doc.data() as Agent
+
+    // Check if 'failed' is a valid transition from current status
+    const validTargets = VALID_TRANSITIONS[agent.status]
+    if (!validTargets || !validTargets.includes('failed')) {
+      // Already in terminal state or invalid transition
+      return false
+    }
+
+    const now = Timestamp.now()
+    tx.update(agentRef, {
+      status: 'failed',
+      statusVersion: agent.statusVersion + 1,
+      errorMessage,
+      updatedAt: now,
+    })
+
+    return true
   })
 }
 

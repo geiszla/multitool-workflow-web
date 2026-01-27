@@ -1,18 +1,20 @@
 /**
  * Inactivity Manager Component.
  *
- * Implements two-stage inactivity timeout:
- * - Suspend after 15 minutes of inactivity
- * - Stop after 1 hour of inactivity
+ * Implements inactivity timeout with disconnect at 15 minutes:
+ * - Warning at 13 minutes (2 min before disconnect)
+ * - Disconnect at 15 minutes (closes WebSocket)
  *
- * Shows warnings before actions:
- * - 2 minutes before suspend
- * - 5 minutes before stop
+ * Activity is tracked via:
+ * - Keyboard/mouse activity on the page
+ * - Pauses when tab is hidden
  *
- * Tracks keyboard/mouse activity and pauses when tab is hidden.
+ * Server-side heartbeat tracking is handled by the WebSocket proxy
+ * based on actual terminal I/O (stdin/stdout messages).
  */
 
-import type { ReactNode } from 'react'
+import type { ReactNode, RefObject } from 'react'
+import type { TerminalHandle } from './Terminal'
 import {
   Alert,
   Button,
@@ -21,32 +23,23 @@ import {
   Stack,
   Text,
 } from '@mantine/core'
-import { IconAlertTriangle, IconPlayerPause, IconPlayerStop } from '@tabler/icons-react'
+import { IconAlertTriangle, IconPlayerPause } from '@tabler/icons-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 /**
  * Inactivity state types.
+ * Simplified: only warning and disconnecting states.
  */
 type InactivityState
   = | 'active'
-    | 'warning-suspend' // 2 min before suspend (at 13 min)
-    | 'warning-stop' // 5 min before stop (at 55 min)
-    | 'suspending'
-    | 'stopping'
+    | 'warning' // 2 min before disconnect (at 13 min)
+    | 'disconnecting'
 
 /**
  * Timeout constants (in milliseconds).
  */
-const SUSPEND_TIMEOUT = 15 * 60 * 1000 // 15 minutes
-const STOP_TIMEOUT = 60 * 60 * 1000 // 1 hour
-const SUSPEND_WARNING = 13 * 60 * 1000 // 13 minutes (2 min before suspend)
-const STOP_WARNING = 55 * 60 * 1000 // 55 minutes (5 min before stop)
-
-/**
- * Activity update interval for server (in milliseconds).
- * Update server every 30 seconds during active use.
- */
-const ACTIVITY_UPDATE_INTERVAL = 30 * 1000
+const DISCONNECT_TIMEOUT = 15 * 60 * 1000 // 15 minutes
+const WARNING_TIME = 13 * 60 * 1000 // 13 minutes (2 min before disconnect)
 
 interface InactivityManagerProps {
   /** Agent ID for API calls */
@@ -55,12 +48,10 @@ interface InactivityManagerProps {
   isRunning: boolean
   /** Whether the terminal is ready */
   terminalReady: boolean
+  /** Reference to the terminal for disconnect */
+  terminalRef?: RefObject<TerminalHandle | null>
   /** Callback when user activity is detected */
   onActivity?: () => void
-  /** Callback when suspend is triggered */
-  onSuspend?: () => Promise<void>
-  /** Callback when stop is triggered */
-  onStop?: () => Promise<void>
   /** Children (typically the Terminal component) */
   children: ReactNode
 }
@@ -68,39 +59,32 @@ interface InactivityManagerProps {
 /**
  * Inactivity Manager component that wraps the terminal.
  *
- * Monitors user activity and triggers suspend/stop after inactivity periods.
+ * Monitors user activity and disconnects after 15 minutes of inactivity.
+ * Server-side reaper will suspend/stop the VM after inactivity threshold.
  */
 export function InactivityManager({
-  agentId,
+  agentId: _agentId, // Reserved for future use
   isRunning,
   terminalReady,
+  terminalRef,
   onActivity,
-  onSuspend,
-  onStop: _onStop, // Reserved for future use when stop timeout is implemented
   children,
 }: InactivityManagerProps) {
   const [state, setState] = useState<InactivityState>('active')
-  const [timeRemaining, setTimeRemaining] = useState<number>(SUSPEND_TIMEOUT)
+  const [timeRemaining, setTimeRemaining] = useState<number>(DISCONNECT_TIMEOUT)
   const lastActivityRef = useRef<number>(Date.now())
-  const suspendTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const stopTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const disconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const warningTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const countdownIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
-  const activityUpdateIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const isPausedRef = useRef<boolean>(false)
-  const pausedTimeRemainingRef = useRef<number>(0)
 
   /**
    * Clears all timers.
    */
   const clearAllTimers = useCallback(() => {
-    if (suspendTimerRef.current) {
-      clearTimeout(suspendTimerRef.current)
-      suspendTimerRef.current = null
-    }
-    if (stopTimerRef.current) {
-      clearTimeout(stopTimerRef.current)
-      stopTimerRef.current = null
+    if (disconnectTimerRef.current) {
+      clearTimeout(disconnectTimerRef.current)
+      disconnectTimerRef.current = null
     }
     if (warningTimerRef.current) {
       clearTimeout(warningTimerRef.current)
@@ -110,28 +94,7 @@ export function InactivityManager({
       clearInterval(countdownIntervalRef.current)
       countdownIntervalRef.current = null
     }
-    if (activityUpdateIntervalRef.current) {
-      clearInterval(activityUpdateIntervalRef.current)
-      activityUpdateIntervalRef.current = null
-    }
   }, [])
-
-  /**
-   * Updates the server with last activity timestamp.
-   */
-  const updateServerActivity = useCallback(async () => {
-    try {
-      await fetch(`/api/agents/${agentId}/activity`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ timestamp: Date.now() }),
-      })
-    }
-    catch (error) {
-      // Silently fail - activity update is best-effort
-      console.warn('Failed to update activity:', error)
-    }
-  }, [agentId])
 
   /**
    * Starts the inactivity timers.
@@ -142,34 +105,28 @@ export function InactivityManager({
     const now = Date.now()
     lastActivityRef.current = now
 
-    // Warning timer for suspend (13 minutes)
+    // Warning timer (13 minutes)
     warningTimerRef.current = setTimeout(() => {
-      setState('warning-suspend')
-      setTimeRemaining(SUSPEND_TIMEOUT - SUSPEND_WARNING)
+      setState('warning')
+      setTimeRemaining(DISCONNECT_TIMEOUT - WARNING_TIME)
 
       // Start countdown interval
       countdownIntervalRef.current = setInterval(() => {
         const elapsed = Date.now() - lastActivityRef.current
-        const remaining = SUSPEND_TIMEOUT - elapsed
+        const remaining = DISCONNECT_TIMEOUT - elapsed
         setTimeRemaining(Math.max(0, remaining))
       }, 1000)
-    }, SUSPEND_WARNING)
+    }, WARNING_TIME)
 
-    // Suspend timer (15 minutes)
-    suspendTimerRef.current = setTimeout(async () => {
-      setState('suspending')
-      if (onSuspend) {
-        await onSuspend()
+    // Disconnect timer (15 minutes)
+    disconnectTimerRef.current = setTimeout(() => {
+      setState('disconnecting')
+      // Disconnect the terminal WebSocket
+      if (terminalRef?.current) {
+        terminalRef.current.disconnect()
       }
-    }, SUSPEND_TIMEOUT)
-
-    // Set up activity update interval
-    activityUpdateIntervalRef.current = setInterval(() => {
-      if (!isPausedRef.current) {
-        updateServerActivity()
-      }
-    }, ACTIVITY_UPDATE_INTERVAL)
-  }, [clearAllTimers, onSuspend, updateServerActivity])
+    }, DISCONNECT_TIMEOUT)
+  }, [clearAllTimers, terminalRef])
 
   /**
    * Resets timers on user activity.
@@ -181,7 +138,7 @@ export function InactivityManager({
 
     lastActivityRef.current = Date.now()
     setState('active')
-    setTimeRemaining(SUSPEND_TIMEOUT)
+    setTimeRemaining(DISCONNECT_TIMEOUT)
 
     // Restart timers
     startTimers()
@@ -195,9 +152,7 @@ export function InactivityManager({
    */
   const handleExtendSession = useCallback(() => {
     handleActivity()
-    // Update server immediately when user explicitly extends
-    updateServerActivity()
-  }, [handleActivity, updateServerActivity])
+  }, [handleActivity])
 
   /**
    * Handles visibility change (pause when tab hidden).
@@ -207,8 +162,6 @@ export function InactivityManager({
       if (document.hidden) {
         // Pause timers when tab is hidden
         isPausedRef.current = true
-        pausedTimeRemainingRef.current = timeRemaining
-
         clearAllTimers()
       }
       else {
@@ -227,7 +180,7 @@ export function InactivityManager({
     return () => {
       document.removeEventListener('visibilitychange', handleVisibilityChange)
     }
-  }, [clearAllTimers, isRunning, terminalReady, startTimers, timeRemaining])
+  }, [clearAllTimers, isRunning, terminalReady, startTimers])
 
   /**
    * Start timers when component mounts and agent is running.
@@ -235,8 +188,6 @@ export function InactivityManager({
   useEffect(() => {
     if (isRunning && terminalReady) {
       startTimers()
-      // Initial activity update
-      updateServerActivity()
     }
     else {
       clearAllTimers()
@@ -246,7 +197,7 @@ export function InactivityManager({
     return () => {
       clearAllTimers()
     }
-  }, [isRunning, terminalReady, startTimers, clearAllTimers, updateServerActivity])
+  }, [isRunning, terminalReady, startTimers, clearAllTimers])
 
   /**
    * Set up global activity listeners.
@@ -294,37 +245,31 @@ export function InactivityManager({
    * Calculates progress percentage.
    */
   const getProgressPercent = (): number => {
-    if (state === 'warning-suspend') {
-      const warningDuration = SUSPEND_TIMEOUT - SUSPEND_WARNING
-      return ((warningDuration - timeRemaining) / warningDuration) * 100
-    }
-    if (state === 'warning-stop') {
-      const warningDuration = STOP_TIMEOUT - STOP_WARNING
+    if (state === 'warning') {
+      const warningDuration = DISCONNECT_TIMEOUT - WARNING_TIME
       return ((warningDuration - timeRemaining) / warningDuration) * 100
     }
     return 0
   }
 
   // Show warning banner if in warning state
-  const showWarning = state === 'warning-suspend' || state === 'warning-stop'
+  const showWarning = state === 'warning'
 
   return (
     <Stack gap={0} style={{ height: '100%' }}>
       {/* Warning Banner */}
       {showWarning && (
         <Alert
-          icon={state === 'warning-suspend' ? <IconPlayerPause size={16} /> : <IconPlayerStop size={16} />}
-          title={state === 'warning-suspend' ? 'Inactivity Warning' : 'Extended Inactivity Warning'}
-          color={state === 'warning-suspend' ? 'yellow' : 'orange'}
+          icon={<IconPlayerPause size={16} />}
+          title="Inactivity Warning"
+          color="yellow"
           withCloseButton={false}
           mb="xs"
         >
           <Stack gap="xs">
             <Group justify="space-between" align="center">
               <Text size="sm">
-                {state === 'warning-suspend'
-                  ? 'The agent will be suspended due to inactivity.'
-                  : 'The agent will be stopped due to extended inactivity.'}
+                The terminal will be disconnected due to inactivity.
               </Text>
               <Text size="sm" fw={600}>
                 {formatTimeRemaining(timeRemaining)}
@@ -333,7 +278,7 @@ export function InactivityManager({
 
             <Progress
               value={getProgressPercent()}
-              color={state === 'warning-suspend' ? 'yellow' : 'orange'}
+              color="yellow"
               size="sm"
               animated
             />

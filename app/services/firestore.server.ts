@@ -26,6 +26,9 @@ export function getFirestore(): Firestore {
   if (!firestoreInstance) {
     firestoreInstance = new Firestore({
       projectId: GCP_PROJECT_ID,
+      // Ignore undefined values in documents to prevent runtime errors
+      // This is a safety net; we also sanitize at the application level
+      ignoreUndefinedProperties: true,
       // The client will automatically use FIRESTORE_EMULATOR_HOST if set
     })
 
