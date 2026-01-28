@@ -5,7 +5,7 @@
  * - GitHub OAuth token (for repo cloning)
  * - Claude API key (for code generation)
  * - Codex API key (optional, for code review)
- * - Resume flag (if agent needs --resume flag)
+ * - Continue flag (if agent needs --continue flag)
  *
  * Security:
  * - Authenticates via GCE instance identity token
@@ -44,7 +44,7 @@ interface CredentialsResponse {
   claudeApiKey?: string
   codexApiKey?: string
   figmaApiKey?: string
-  needsResume?: boolean
+  needsContinue?: boolean
   repoOwner: string
   repoName: string
   branch: string
@@ -156,7 +156,7 @@ export async function loader({ request, params }: Route.LoaderArgs) {
     claudeApiKey,
     codexApiKey: codexApiKey ?? undefined,
     figmaApiKey: figmaApiKey ?? undefined,
-    needsResume: agent.needsResume,
+    needsContinue: agent.needsContinue,
     repoOwner: agent.repoOwner,
     repoName: agent.repoName,
     branch: agent.branch,

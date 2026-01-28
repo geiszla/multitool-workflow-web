@@ -19,7 +19,7 @@ import { createCookieSessionStorage } from 'react-router'
 import { WebSocket as WsClient } from 'ws'
 import { canAccessAgent, getAgent, markAgentFailed } from '~/models/agent.server'
 import { getSession as getFirestoreSession } from '~/models/session.server'
-import { getInstanceStatus } from '~/services/compute.server'
+import { getInstanceInfo } from '~/services/compute.server'
 import { getFirestore } from '~/services/firestore.server'
 import { env } from './env.server'
 import { getSecret } from './secrets.server'
@@ -29,6 +29,15 @@ const VM_TERMINAL_PORT = 8080
 
 // Heartbeat throttling - max once per 60 seconds
 const HEARTBEAT_THROTTLE_MS = 60_000
+
+// Ping/pong constants for VM connection health monitoring
+const PING_INTERVAL_MS = 30_000 // 30 seconds
+const PONG_TIMEOUT_MS = 65_000 // 65 seconds (just over 2x ping interval)
+const VM_HANDSHAKE_TIMEOUT_MS = 10_000 // 10 seconds for initial VM connection
+
+// VM reconnection constants
+const MAX_VM_RETRY_ATTEMPTS = 5
+const VM_RETRY_BASE_DELAY_MS = 1000
 
 // Track last heartbeat update per agent to avoid excessive Firestore writes
 const lastHeartbeatUpdates = new Map<string, number>()
@@ -49,7 +58,7 @@ function getAllowedOrigins(): string[] {
 /**
  * WebSocket message types (must match VM pty-server protocol).
  */
-export type WsMessageType = 'stdin' | 'stdout' | 'resize' | 'ping' | 'pong' | 'error' | 'exit'
+export type WsMessageType = 'resize' | 'error' | 'exit'
 
 export interface WsMessage {
   type: WsMessageType
@@ -182,8 +191,10 @@ async function updateHeartbeat(agentId: string): Promise<void> {
 
   try {
     const db = getFirestore()
+    const timestamp = Timestamp.now()
     await db.collection('agents').doc(agentId).update({
-      lastHeartbeatAt: Timestamp.now(),
+      lastHeartbeatAt: timestamp,
+      updatedAt: timestamp,
     })
   }
   catch (error) {
@@ -266,7 +277,7 @@ export async function setupProxyConnection(
     // Fetch from GCE with retry
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        const instanceInfo = await getInstanceStatus(agent.instanceName, agent.instanceZone)
+        const instanceInfo = await getInstanceInfo(agent.instanceName, agent.instanceZone)
         if (instanceInfo?.internalIp) {
           vmIp = instanceInfo.internalIp
           // eslint-disable-next-line no-console
@@ -294,121 +305,231 @@ export async function setupProxyConnection(
   // eslint-disable-next-line no-console
   console.log(`WebSocket proxy: Connecting to VM ${vmIp}:${VM_TERMINAL_PORT} for agent ${agentId}`)
 
-  // 7. Connect to VM
-  const vmUrl = `ws://${vmIp}:${VM_TERMINAL_PORT}`
-  const vmWs = new WsClient(vmUrl)
-
   // Track connection state
   let vmConnected = false
   let browserConnected = true
+  let vmRetryAttempt = 0
+  let vmPingInterval: NodeJS.Timeout | null = null
+  let currentVmWs: WsClient | null = null
 
-  // Handle VM connection
-  vmWs.on('open', () => {
-    vmConnected = true
-    // eslint-disable-next-line no-console
-    console.log('WebSocket proxy: Connected to VM for agent:', agentId)
+  /**
+   * Sets up connection to VM with all event handlers.
+   * Can be called for initial connection or retries.
+   * Uses the vmIp fetched at connection start (assumes IP doesn't change).
+   */
+  function connectToVm(): Promise<boolean> {
+    return new Promise((resolve) => {
+      const vmUrl = `ws://${vmIp}:${VM_TERMINAL_PORT}`
+      const vmWs = new WsClient(vmUrl, {
+        handshakeTimeout: VM_HANDSHAKE_TIMEOUT_MS,
+      })
 
-    // Initialize heartbeat on connection
-    updateHeartbeat(agentId)
-  })
+      currentVmWs = vmWs
 
-  vmWs.on('message', (data: Buffer | string) => {
-    if (browserConnected && ws.readyState === ws.OPEN) {
-      // Forward message from VM to browser
-      ws.send(data.toString())
+      // Timestamp-based heartbeat tracking for VM connection
+      let vmLastPongAt = Date.now()
 
-      // Update server-side heartbeat on any VM output (throttled)
-      updateHeartbeat(agentId)
-    }
-  })
+      vmWs.on('open', () => {
+        vmConnected = true
+        vmRetryAttempt = 0 // Reset retry counter on successful connection
+        // eslint-disable-next-line no-console
+        console.log('WebSocket proxy: Connected to VM for agent:', agentId)
 
-  vmWs.on('close', (code, reason) => {
-    // eslint-disable-next-line no-console
-    console.log('WebSocket proxy: VM connection closed:', code, reason.toString())
-    vmConnected = false
-    if (browserConnected && ws.readyState === ws.OPEN) {
-      ws.close(code, reason.toString())
-    }
-  })
+        // Initialize heartbeat on connection
+        updateHeartbeat(agentId)
 
-  vmWs.on('error', async (error) => {
-    console.error('WebSocket proxy: VM connection error:', error.message)
-    vmConnected = false
-
-    // Check if VM still exists - if not, mark agent as failed
-    // Only check if we have both instanceName and instanceZone
-    if (agent.instanceName && agent.instanceZone) {
-      try {
-        const instanceInfo = await getInstanceStatus(agent.instanceName, agent.instanceZone)
-        if (!instanceInfo) {
-          // VM was deleted externally - mark agent as failed using state machine
-          console.error(`WebSocket proxy: VM ${agent.instanceName} not found, marking agent ${agentId} as failed`)
-          const updated = await markAgentFailed(agentId, 'VM was deleted externally')
-          if (!updated) {
-            console.warn(`WebSocket proxy: Could not mark agent ${agentId} as failed (already terminal or not found)`)
-          }
+        // Set up VM ping/pong health check
+        if (vmPingInterval) {
+          clearInterval(vmPingInterval)
         }
-      }
-      catch (checkError) {
-        console.warn('WebSocket proxy: Failed to check VM status:', checkError)
-      }
-    }
+        vmPingInterval = setInterval(() => {
+          if (!vmConnected || vmWs.readyState !== vmWs.OPEN) {
+            if (vmPingInterval) {
+              clearInterval(vmPingInterval)
+              vmPingInterval = null
+            }
+            return
+          }
 
-    if (browserConnected && ws.readyState === ws.OPEN) {
-      ws.send(JSON.stringify({ type: 'error', message: 'VM connection error' }))
-      ws.close(1011, 'VM connection error')
-    }
-  })
+          // Check if VM pong timed out
+          if (Date.now() - vmLastPongAt > PONG_TIMEOUT_MS) {
+            console.error(`WebSocket proxy: VM pong timeout for agent ${agentId}`)
+            if (vmPingInterval) {
+              clearInterval(vmPingInterval)
+              vmPingInterval = null
+            }
+            vmWs.close(1011, 'Pong timeout')
+            // Don't close browser here - close handler will attempt retry
+            return
+          }
 
-  // Handle browser messages
-  ws.on('message', (data: Buffer | string) => {
-    if (vmConnected && vmWs.readyState === vmWs.OPEN) {
-      // Forward message from browser to VM
-      vmWs.send(data.toString())
+          vmWs.ping()
+        }, PING_INTERVAL_MS)
 
-      // Update heartbeat on user input (stdin only, not resize or other messages)
-      try {
-        const msg = JSON.parse(data.toString()) as WsMessage
-        if (msg.type === 'stdin') {
+        resolve(true)
+      })
+
+      vmWs.on('pong', () => {
+        vmLastPongAt = Date.now()
+      })
+
+      vmWs.on('message', (data: Buffer | string, isBinary: boolean) => {
+        if (browserConnected && ws.readyState === ws.OPEN) {
+          // Forward message from VM to browser, preserving binary flag
+          ws.send(data, { binary: isBinary })
+
+          // Update server-side heartbeat on any VM output (throttled)
           updateHeartbeat(agentId)
         }
-      }
-      catch {
-        // Ignore parse errors
-      }
-    }
-  })
+      })
 
-  ws.on('close', () => {
-    // eslint-disable-next-line no-console
-    console.log('WebSocket proxy: Browser connection closed for agent:', agentId)
-    browserConnected = false
-    if (vmConnected && vmWs.readyState === vmWs.OPEN) {
-      vmWs.close()
+      vmWs.on('error', async (error) => {
+        console.error('WebSocket proxy: VM connection error:', error.message)
+        vmConnected = false
+
+        // Check if VM still exists - if not, mark agent as failed
+        const { instanceName, instanceZone } = agent ?? {}
+        if (instanceName && instanceZone) {
+          try {
+            const instanceInfo = await getInstanceInfo(instanceName, instanceZone)
+            if (!instanceInfo) {
+              // VM was deleted externally - mark agent as failed
+              console.error(`WebSocket proxy: VM ${instanceName} not found, marking agent ${agentId} as failed`)
+              const updated = await markAgentFailed(agentId, 'VM was deleted externally')
+              if (!updated) {
+                console.warn(`WebSocket proxy: Could not mark agent ${agentId} as failed (already terminal or not found)`)
+              }
+              // Don't retry if VM was deleted
+              if (browserConnected && ws.readyState === ws.OPEN) {
+                ws.send(JSON.stringify({ type: 'error', message: 'VM was deleted' }))
+                ws.close(1011, 'VM was deleted')
+              }
+              resolve(false)
+              return
+            }
+          }
+          catch (checkError) {
+            console.warn('WebSocket proxy: Failed to check VM status:', checkError)
+          }
+        }
+
+        // Error will be followed by close event which handles retry
+        resolve(false)
+      })
+
+      // VM close handler with retry logic
+      vmWs.on('close', async (code, reason) => {
+        // eslint-disable-next-line no-console
+        console.log('WebSocket proxy: VM connection closed:', code, reason.toString())
+        vmConnected = false
+
+        // Clear VM ping interval
+        if (vmPingInterval) {
+          clearInterval(vmPingInterval)
+          vmPingInterval = null
+        }
+
+        // Don't retry if browser already disconnected
+        if (!browserConnected || ws.readyState !== ws.OPEN) {
+          return
+        }
+
+        // Don't retry on normal close or policy violation
+        const noRetryCodes = [1000, 1008]
+        if (noRetryCodes.includes(code)) {
+          ws.close(code, reason.toString())
+          return
+        }
+
+        // Check retry limit
+        if (vmRetryAttempt >= MAX_VM_RETRY_ATTEMPTS) {
+          console.error(`WebSocket proxy: Max VM retry attempts (${MAX_VM_RETRY_ATTEMPTS}) reached for agent ${agentId}`)
+          ws.send(JSON.stringify({ type: 'error', message: 'VM connection failed after multiple retries' }))
+          ws.close(1011, 'VM reconnection failed')
+          return
+        }
+
+        // Calculate exponential backoff with jitter
+        const baseDelay = Math.min(VM_RETRY_BASE_DELAY_MS * 2 ** vmRetryAttempt, 30000)
+        const jitter = Math.random() * 1000
+        const delay = baseDelay + jitter
+
+        vmRetryAttempt++
+        // eslint-disable-next-line no-console
+        console.log(`WebSocket proxy: VM closed, reconnecting in ${Math.round(delay)}ms (attempt ${vmRetryAttempt}/${MAX_VM_RETRY_ATTEMPTS}) for agent ${agentId}`)
+
+        // Wait before retry
+        await new Promise(r => setTimeout(r, delay))
+
+        // Check browser still connected after delay
+        if (!browserConnected || ws.readyState !== ws.OPEN) {
+          return
+        }
+
+        // Attempt reconnection
+        const reconnected = await connectToVm()
+        if (!reconnected && browserConnected && ws.readyState === ws.OPEN) {
+          // connectToVm will handle further retries via its own close handler
+          // This path is only reached if initial connection setup fails
+        }
+      })
+    })
+  }
+
+  // Handle browser messages - forward to current VM connection
+  ws.on('message', (data: Buffer | string, isBinary: boolean) => {
+    if (vmConnected && currentVmWs && currentVmWs.readyState === WsClient.OPEN) {
+      // Forward message from browser to VM, preserving binary flag
+      currentVmWs.send(data, { binary: isBinary })
+
+      // Update heartbeat on user input (binary packets are stdin)
+      if (isBinary) {
+        updateHeartbeat(agentId)
+      }
+      // Non-binary messages are control messages (resize, etc.) - no heartbeat update
     }
   })
 
   ws.on('error', (error) => {
     console.error('WebSocket proxy: Browser connection error:', error.message)
     browserConnected = false
-    if (vmConnected && vmWs.readyState === vmWs.OPEN) {
-      vmWs.close()
+    if (vmConnected && currentVmWs && currentVmWs.readyState === WsClient.OPEN) {
+      currentVmWs.close()
     }
   })
 
-  // Ping/pong health check (every 30 seconds)
-  const pingInterval = setInterval(() => {
+  // Browser close handler - cleans up all resources
+  // Note: No browser ping/pong - let clients be inactive in background tabs
+  ws.on('close', () => {
+    // eslint-disable-next-line no-console
+    console.log('WebSocket proxy: Browser connection closed for agent:', agentId)
+    browserConnected = false
+
+    // Clean up VM connection
+    if (vmConnected && currentVmWs && currentVmWs.readyState === WsClient.OPEN) {
+      currentVmWs.close()
+    }
+
+    // Clean up intervals
+    if (vmPingInterval) {
+      clearInterval(vmPingInterval)
+      vmPingInterval = null
+    }
+
+    // Clean up heartbeat tracking to prevent memory leak
+    lastHeartbeatUpdates.delete(agentId)
+  })
+
+  // 7. Initial VM connection
+  const connected = await connectToVm()
+  if (!connected) {
+    // Initial connection failed - close browser connection
     if (browserConnected && ws.readyState === ws.OPEN) {
-      ws.ping()
+      ws.send(JSON.stringify({ type: 'error', message: 'Failed to connect to VM' }))
+      ws.close(1011, 'VM connection failed')
     }
-    else {
-      clearInterval(pingInterval)
-    }
-  }, 30000)
-
-  ws.on('pong', () => {
-    // Browser is alive
-  })
+    return { success: false, error: 'Failed to connect to VM', errorCode: 4500 }
+  }
 
   return { success: true }
 }

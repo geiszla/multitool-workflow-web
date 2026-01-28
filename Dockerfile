@@ -49,10 +49,9 @@ WORKDIR /app
 # Copy production dependencies
 COPY --from=prod-deps /app/node_modules ./node_modules
 
-# Copy built application
+# Copy built application (including compiled server.js)
 COPY --from=build /app/build ./build
 COPY --from=build /app/package.json ./package.json
-COPY --from=build /app/server.ts ./server.ts
 
 # Set ownership
 RUN chown -R multitool-workflow-web:nodejs /app
@@ -72,4 +71,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
   CMD wget --no-verbose --tries=1 --spider http://localhost:8080/healthz || exit 1
 
 # Start the application with custom server (supports WebSocket terminal proxy)
-CMD ["node", "--import", "tsx", "server.ts"]
+CMD ["node", "build/server.js"]

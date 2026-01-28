@@ -82,11 +82,9 @@ export async function action({ request, params }: ActionFunctionArgs) {
         agentId,
         statusToClaim,
         'running',
-        {
-          terminalReady: false, // Reset until pty-server reports ready
-          needsResume: false, // Clear flag on successful transition
-          // NOTE: internalIp is NOT stored in Firestore - fetched on-demand from GCE
-        },
+        statusToClaim === 'stopped'
+          ? { terminalReady: false } // Reset until pty-server reports ready
+          : undefined,
       )
     }
     catch (error) {

@@ -16,8 +16,7 @@ interface AgentCardProps {
   status: string
   repoOwner: string
   repoName: string
-  issueNumber?: number
-  issueTitle?: string
+  issueNumber: number
   createdAt: string
   ownerGithubLogin?: string
   isOwned?: boolean
@@ -30,7 +29,6 @@ export function AgentCard({
   repoOwner,
   repoName,
   issueNumber,
-  issueTitle,
   createdAt,
   ownerGithubLogin,
   isOwned = true,
@@ -98,16 +96,13 @@ export function AgentCard({
                 </Text>
               </Group>
 
-              {issueNumber && (
-                <Group gap="xs" c="dimmed">
-                  <IconCircleDot size={14} />
-                  <Text size="sm" truncate style={{ maxWidth: 200 }}>
-                    #
-                    {issueNumber}
-                    {issueTitle && `: ${issueTitle}`}
-                  </Text>
-                </Group>
-              )}
+              <Group gap="xs" c="dimmed">
+                <IconCircleDot size={14} />
+                <Text size="sm">
+                  #
+                  {issueNumber}
+                </Text>
+              </Group>
             </Group>
           </Stack>
 

@@ -1,0 +1,3 @@
+[submodule "multitool-workflow"]
+	path = multitool-workflow
+	url = https://github.com/geiszla/multitool-workflow.git

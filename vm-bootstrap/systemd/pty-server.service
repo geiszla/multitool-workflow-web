@@ -9,6 +9,8 @@ Type=simple
 User=agent
 WorkingDirectory=/opt/vm-agent
 EnvironmentFile=/etc/default/agent-env
+# Ensure PATH includes Claude CLI location (~/.local/bin) and Codex CLI location
+Environment=PATH=/home/agent/.local/bin:/usr/local/bin:/usr/bin:/bin
 # Note: Credentials are fetched from Cloud Run at startup, not from EnvironmentFile
 ExecStart=/usr/bin/node pty-server.js
 Restart=on-failure

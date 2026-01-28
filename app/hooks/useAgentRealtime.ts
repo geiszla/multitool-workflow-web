@@ -30,8 +30,7 @@ export interface RealtimeAgent {
   repoOwner: string
   repoName: string
   branch: string
-  issueNumber?: number
-  issueTitle?: string
+  issueNumber: number
 
   // Agent configuration
   instructions?: string
@@ -45,7 +44,6 @@ export interface RealtimeAgent {
   // Instance info (excludes internalIp for security)
   instanceName?: string
   instanceZone?: string
-  instanceStatus?: string
 
   // Terminal state
   terminalReady?: boolean
@@ -55,7 +53,7 @@ export interface RealtimeAgent {
   cloneError?: string
 
   // Resume tracking
-  needsResume?: boolean
+  needsContinue?: boolean
 
   // Timestamps
   createdAt: Timestamp
@@ -102,7 +100,7 @@ export function useAgentRealtime(agentId: string): UseAgentRealtimeResult {
         (docSnapshot) => {
           if (docSnapshot.exists()) {
             const data = docSnapshot.data() as RealtimeAgent
-            setAgent({ ...data, id: docSnapshot.id })
+            setAgent(data)
             setLoading(false)
             setError(null)
           }

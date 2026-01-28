@@ -14,12 +14,15 @@ import './Terminal.css'
 // Import xterm.js CSS
 import '@xterm/xterm/css/xterm.css'
 
+// Reuse TextEncoder/TextDecoder instances to avoid per-keystroke allocation
+const textEncoder = new TextEncoder()
+const textDecoder = new TextDecoder()
+
 /**
  * WebSocket message types (must match server protocol).
  */
 interface WsMessage {
-  type: 'stdin' | 'stdout' | 'resize' | 'error' | 'exit' | 'connected' | 'session_active' | 'session_taken_over' | 'takeover'
-  data?: string
+  type: 'resize' | 'error' | 'exit' | 'connected' | 'session_active' | 'session_taken_over' | 'takeover'
   cols?: number
   rows?: number
   code?: number
@@ -30,7 +33,12 @@ interface WsMessage {
 /**
  * Connection state.
  */
-type ConnectionState = 'connecting' | 'resuming' | 'connected' | 'disconnected' | 'error' | 'session_conflict'
+type ConnectionState = 'connecting' | 'resuming' | 'connected' | 'disconnected' | 'reconnecting' | 'error' | 'session_conflict'
+
+/**
+ * Maximum retry attempts before giving up.
+ */
+const MAX_RETRY_ATTEMPTS = 10
 
 /**
  * Imperative handle for Terminal component.
@@ -49,30 +57,39 @@ interface TerminalProps {
   ref?: RefObject<TerminalHandle | null>
   /** Current agent status - used to detect suspended state for auto-resume */
   agentStatus?: string
+  /** Callback when WebSocket activity occurs (stdin/stdout) - used for inactivity tracking */
+  onActivity?: () => void
 }
 
 /**
  * Terminal component using xterm.js.
  * Uses ref prop pattern (React 19) to expose imperative handle to parent.
  */
-export function Terminal({ ref, agentId, agentStatus }: TerminalProps) {
+export function Terminal({ ref, agentId, agentStatus, onActivity }: TerminalProps) {
   const terminalRef = useRef<HTMLDivElement>(null)
   const xtermRef = useRef<import('@xterm/xterm').Terminal | null>(null)
   const fitAddonRef = useRef<import('@xterm/addon-fit').FitAddon | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
   const reconnectTimeoutRef = useRef<number | null>(null)
   const reconnectAttemptRef = useRef(0)
+  // Track online handler for cleanup on unmount
+  const onlineHandlerRef = useRef<(() => void) | null>(null)
 
   const [connectionState, setConnectionState] = useState<ConnectionState>('connecting')
+  // Ref to track connection state for terminal.onData callback (avoids stale closure)
+  const connectionStateRef = useRef<ConnectionState>('connecting')
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
 
   // Expose imperative handle for parent components
   useImperativeHandle(ref, () => ({
     sendInput: (text: string) => {
-      if (wsRef.current?.readyState === WebSocket.OPEN) {
-        const message: WsMessage = { type: 'stdin', data: text }
-        wsRef.current.send(JSON.stringify(message))
+      // Only send when fully connected (same check as terminal.onData)
+      if (wsRef.current?.readyState === WebSocket.OPEN && connectionState === 'connected') {
+        // Send stdin as binary packet
+        wsRef.current.send(textEncoder.encode(text))
+        // Signal activity on programmatic input (e.g., Finish prompt)
+        onActivity?.()
       }
     },
     isConnected: () => connectionState === 'connected',
@@ -86,7 +103,7 @@ export function Terminal({ ref, agentId, agentStatus }: TerminalProps) {
         wsRef.current = null
       }
     },
-  }), [connectionState])
+  }), [connectionState, onActivity])
 
   /**
    * Initialize xterm.js terminal.
@@ -140,11 +157,16 @@ export function Terminal({ ref, agentId, agentStatus }: TerminalProps) {
     xtermRef.current = terminal
     fitAddonRef.current = fitAddon
 
-    // Handle terminal input
+    // Handle terminal input - send as binary for efficiency
+    // Note: We use a ref to track connection state to avoid stale closure issues
     terminal.onData((data) => {
-      if (wsRef.current?.readyState === WebSocket.OPEN) {
-        const message: WsMessage = { type: 'stdin', data }
-        wsRef.current.send(JSON.stringify(message))
+      // Only send stdin when fully connected (not during session_conflict or other states)
+      // The connectionState check prevents phantom activity when viewing takeover UI
+      if (wsRef.current?.readyState === WebSocket.OPEN && connectionStateRef.current === 'connected') {
+        // Send stdin as binary packet
+        wsRef.current.send(textEncoder.encode(data))
+        // Signal activity on stdin (user typing)
+        onActivity?.()
       }
     })
 
@@ -155,7 +177,7 @@ export function Terminal({ ref, agentId, agentStatus }: TerminalProps) {
         wsRef.current.send(JSON.stringify(message))
       }
     })
-  }, [])
+  }, [onActivity])
 
   /**
    * Resume a suspended agent.
@@ -219,12 +241,28 @@ export function Terminal({ ref, agentId, agentStatus }: TerminalProps) {
     const ws = new WebSocket(wsUrl)
     wsRef.current = ws
 
+    // Set binary type for proper ArrayBuffer handling
+    ws.binaryType = 'arraybuffer'
+
     ws.onopen = () => {
       // Wait for 'connected' or 'session_active' message to set state
       reconnectAttemptRef.current = 0
     }
 
     ws.onmessage = (event) => {
+      // Check if this is a binary message (stdout data)
+      if (event.data instanceof ArrayBuffer) {
+        // Binary packet = stdout, write directly to terminal
+        const text = textDecoder.decode(event.data)
+        if (xtermRef.current) {
+          xtermRef.current.write(text)
+          // Signal activity on stdout (receiving output)
+          onActivity?.()
+        }
+        return
+      }
+
+      // JSON packet = control message
       try {
         const msg = JSON.parse(event.data) as WsMessage
 
@@ -252,12 +290,6 @@ export function Terminal({ ref, agentId, agentStatus }: TerminalProps) {
             // Our session was taken over by another client
             setConnectionState('error')
             setErrorMessage('Session was taken over by another browser/tab.')
-            break
-
-          case 'stdout':
-            if (msg.data && xtermRef.current) {
-              xtermRef.current.write(msg.data)
-            }
             break
 
           case 'error':
@@ -304,13 +336,41 @@ export function Terminal({ ref, agentId, agentStatus }: TerminalProps) {
         return
       }
 
-      setConnectionState('disconnected')
-
-      // Exponential backoff for reconnection
+      // Check max retry limit
       const attempt = reconnectAttemptRef.current
-      const delay = Math.min(1000 * 2 ** attempt, 30000) // Max 30 seconds
+      if (attempt >= MAX_RETRY_ATTEMPTS) {
+        setConnectionState('error')
+        setErrorMessage('Maximum reconnection attempts reached. Please refresh the page.')
+        return
+      }
 
-      console.warn(`WebSocket closed, reconnecting in ${delay}ms (attempt ${attempt + 1})`)
+      // Optionally pause retries when browser is offline
+      if (typeof navigator !== 'undefined' && !navigator.onLine) {
+        setConnectionState('disconnected')
+        setErrorMessage('Waiting for network connection...')
+        // Wait for online event before retrying (cleanup any existing handler first)
+        if (onlineHandlerRef.current) {
+          window.removeEventListener('online', onlineHandlerRef.current)
+        }
+        const handleOnline = () => {
+          window.removeEventListener('online', handleOnline)
+          onlineHandlerRef.current = null
+          connect()
+        }
+        onlineHandlerRef.current = handleOnline
+        window.addEventListener('online', handleOnline)
+        return
+      }
+
+      setConnectionState('reconnecting')
+      setErrorMessage(null)
+
+      // Exponential backoff with jitter for reconnection
+      const baseDelay = Math.min(1000 * 2 ** attempt, 30000) // Max 30 seconds base
+      const jitter = Math.random() * 1000 // 0-1 second random jitter
+      const delay = baseDelay + jitter
+
+      console.warn(`WebSocket closed, reconnecting in ${Math.round(delay)}ms (attempt ${attempt + 1}/${MAX_RETRY_ATTEMPTS})`)
       reconnectAttemptRef.current = attempt + 1
 
       reconnectTimeoutRef.current = window.setTimeout(() => {
@@ -319,11 +379,12 @@ export function Terminal({ ref, agentId, agentStatus }: TerminalProps) {
     }
 
     ws.onerror = (error) => {
+      // Log error but don't set error state here
+      // Error events are always followed by close events, which handle retry
+      // This prevents duplicate state transitions
       console.error('WebSocket error:', error)
-      setErrorMessage('Connection error')
-      setConnectionState('error')
     }
-  }, [agentId, agentStatus, resumeAgent])
+  }, [agentId, agentStatus, resumeAgent, onActivity])
 
   /**
    * Disconnect from WebSocket.
@@ -332,6 +393,12 @@ export function Terminal({ ref, agentId, agentStatus }: TerminalProps) {
     if (reconnectTimeoutRef.current) {
       clearTimeout(reconnectTimeoutRef.current)
       reconnectTimeoutRef.current = null
+    }
+
+    // Clean up online handler if set
+    if (onlineHandlerRef.current) {
+      window.removeEventListener('online', onlineHandlerRef.current)
+      onlineHandlerRef.current = null
     }
 
     if (wsRef.current) {
@@ -349,6 +416,14 @@ export function Terminal({ ref, agentId, agentStatus }: TerminalProps) {
       wsRef.current.send(JSON.stringify(message))
     }
   }, [])
+
+  /**
+   * Keep connectionStateRef in sync with connectionState.
+   * This allows terminal.onData callback to access current state without stale closures.
+   */
+  useEffect(() => {
+    connectionStateRef.current = connectionState
+  }, [connectionState])
 
   /**
    * Handle window resize.
@@ -418,6 +493,23 @@ export function Terminal({ ref, agentId, agentStatus }: TerminalProps) {
             <>
               <Loader color="blue" size="lg" />
               <Text className="terminal-overlay-text">Connecting to terminal...</Text>
+            </>
+          )}
+
+          {connectionState === 'reconnecting' && (
+            <>
+              <Loader color="orange" size="lg" />
+              <Text className="terminal-overlay-text">
+                Reconnecting... (attempt
+                {' '}
+                {reconnectAttemptRef.current}
+                /
+                {MAX_RETRY_ATTEMPTS}
+                )
+              </Text>
+              <Text size="sm" c="dimmed" ta="center" mt="xs">
+                Connection was interrupted. Attempting to reconnect...
+              </Text>
             </>
           )}
 

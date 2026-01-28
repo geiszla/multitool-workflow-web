@@ -47,6 +47,28 @@ gcloud services enable \
 
 ---
 
+## 0.1 Create Artifact Registry Repository
+
+Create the Docker repository for storing container images:
+
+```bash
+gcloud artifacts repositories create multitool-workflow-web \
+  --repository-format=docker \
+  --location=eu-west3 \
+  --description="Docker images for multitool-workflow-web"
+```
+
+Grant Cloud Build permission to push to Artifact Registry:
+
+```bash
+PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${PROJECT_NUMBER}@cloudbuild.gserviceaccount.com" \
+  --role="roles/artifactregistry.writer"
+```
+
+---
+
 ## 1. GitHub OAuth App
 
 Create a GitHub OAuth App for authentication.

@@ -67,6 +67,12 @@ build {
     destination = "/tmp/vm-bootstrap"
   }
 
+  # Upload multitool-workflow plugin to the build VM
+  provisioner "file" {
+    source      = "multitool-workflow/"
+    destination = "/tmp/multitool-workflow"
+  }
+
   # Run the main provisioning script
   provisioner "shell" {
     script = "packer/scripts/provision.sh"

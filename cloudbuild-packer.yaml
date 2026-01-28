@@ -9,6 +9,10 @@
 # NOT triggered by code changes to avoid unnecessary rebuilds
 
 steps:
+  # Step 0: Initialize git submodules (multitool-workflow plugin)
+  - name: gcr.io/cloud-builders/git
+    args: [submodule, update, --init, --recursive]
+
   # Step 1: Initialize Packer plugins
   - name: 'hashicorp/packer:1.11'
     entrypoint: packer

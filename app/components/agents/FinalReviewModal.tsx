@@ -1,5 +1,5 @@
 /**
- * Finish Modal Component.
+ * FinalReview Modal Component.
  *
  * Confirms the user's intent to instruct the agent to complete its work:
  * - Run Codex code review
@@ -21,7 +21,7 @@ import {
   IconGitPullRequest,
 } from '@tabler/icons-react'
 
-interface FinishModalProps {
+interface FinalReviewModalProps {
   opened: boolean
   onClose: () => void
   onConfirm: () => void
@@ -29,18 +29,18 @@ interface FinishModalProps {
   error?: string
 }
 
-export function FinishModal({
+export function FinalReviewModal({
   opened,
   onClose,
   onConfirm,
   isLoading,
   error,
-}: FinishModalProps) {
+}: FinalReviewModalProps) {
   return (
     <Modal
       opened={opened}
       onClose={onClose}
-      title="Finish Agent Work"
+      title="Perform Final Review"
       centered
       size="md"
     >
@@ -87,7 +87,7 @@ export function FinishModal({
             onClick={onConfirm}
             loading={isLoading}
           >
-            Start Finish Process
+            Start Final Review Process
           </Button>
         </Group>
       </Stack>

@@ -67,16 +67,16 @@ Stores agent records with status and metadata.
 - `id`: UUID
 - `userId`: Internal user UUID
 - `ownerGithubLogin`: Denormalized owner GitHub username (for display)
-- `title`: Display title
+- `title`: GitHub issue title (auto-populated from the linked issue)
 - `status`: State machine status
 - `statusVersion`: Optimistic locking version
 - `sharedWith?`: Array of user UUIDs with access (max 50)
 - `repoOwner`, `repoName`, `branch`: Target repository
-- `issueNumber?`, `issueTitle?`: Optional GitHub issue
+- `issueNumber`: GitHub issue number (required for workflow auto-start)
 - `instructions?`: User instructions for the agent
 - `startedAt?`, `suspendedAt?`, `stoppedAt?`, `completedAt?`: Timestamps
 - `errorMessage?`: Error details if failed
-- `instanceName?`, `instanceZone?`, `instanceStatus?`: GCE instance info
+- `instanceName?`, `instanceZone?`: GCE instance info
 - `lastHeartbeatAt?`: Server-updated heartbeat for reaper
 - `createdAt`, `updatedAt`: Timestamps
 
@@ -304,11 +304,7 @@ Two separate communication channels for optimal performance and reliability:
 
 ```typescript
 type WSMessage
-  = | { type: 'stdin', data: string }
-    | { type: 'stdout', data: string }
     | { type: 'resize', cols: number, rows: number }
-    | { type: 'ping' }
-    | { type: 'pong' }
     | { type: 'error', message: string }
     | { type: 'exit', code: number }
 ```
@@ -365,7 +361,7 @@ Uses pre-built image + systemd services for reliable orchestration:
    - Spawns Claude Code in PTY
    - Reports `terminalReady: true`
 
-**Idempotency**: Bootstrap only runs on initial provision (marker file `/var/lib/agent-bootstrap/done`). VM restarts skip bootstrap and resume the existing session.
+**Idempotency**: Bootstrap only runs on initial provision (marker file `/var/lib/agent-bootstrap/done`). VM restarts skip bootstrap and continues the existing session.
 
 ## Credential Flow
 
@@ -420,8 +416,8 @@ Uses pre-built image + systemd services for reliable orchestration:
 **From Stopped (slow)**:
 - VM boots fresh, disk preserved
 - ~60 second start time
-- Uses Claude Code `--resume` flag for conversation continuity
-- `needsResume: true` flag stored in Firestore
+- Uses Claude Code `--continue` flag for conversation continuity
+- `needsContinue: true` flag stored in Firestore
 
 ## Firebase Realtime Integration
 
@@ -448,12 +444,11 @@ match /agents/{agentId} {
 
 New fields in `agents/{agentId}`:
 - `internalIp`: VM internal IP (server-side only)
-- `terminalPort`: WebSocket port (default 8080)
 - `lastActivity`: Last user activity timestamp
 - `terminalReady`: True when PTY server is ready
 - `cloneStatus`: 'pending' | 'cloning' | 'completed' | 'failed'
 - `cloneError`: Clone error message if failed
-- `needsResume`: True if stopped, needs --resume flag
+- `needsContinue`: True if stopped, needs --continue flag
 - `provisioningOperationId`: GCE operation ID for polling
 
 ## API Endpoints (Part 3)

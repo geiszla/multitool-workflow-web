@@ -8,7 +8,6 @@ import {
   Stack,
   Text,
   Textarea,
-  TextInput,
   Title,
 } from '@mantine/core'
 import { IconAlertCircle, IconRocket, IconSettings } from '@tabler/icons-react'
@@ -36,7 +35,6 @@ export function NewAgentForm({
   }>()
 
   // Form state
-  const [title, setTitle] = useState('')
   const [selectedRepo, setSelectedRepo] = useState<string | null>(null)
   const [selectedBranch, setSelectedBranch] = useState<string | null>(null)
   const [selectedIssue, setSelectedIssue] = useState<string | null>(null)
@@ -118,29 +116,28 @@ export function NewAgentForm({
   }, [fetcher.data, navigate])
 
   const handleSubmit = () => {
-    if (!selectedRepoData || !selectedBranch)
+    if (!selectedRepoData || !selectedBranch || !selectedIssue)
       return
 
-    const selectedIssueData = selectedIssue
-      ? issues.find(i => String(i.number) === selectedIssue)
-      : null
+    const selectedIssueData = issues.find(i => String(i.number) === selectedIssue)
+    if (!selectedIssueData)
+      return
 
     fetcher.submit(
       {
         intent: 'create',
-        title: title.trim() || '',
         repoOwner: selectedRepoData.owner,
         repoName: selectedRepoData.name,
         branch: selectedBranch,
-        issueNumber: selectedIssueData?.number?.toString() || '',
-        issueTitle: selectedIssueData?.title || '',
+        issueNumber: selectedIssueData.number.toString(),
+        title: selectedIssueData.title,
         instructions: instructions.trim(),
       },
       { method: 'post' },
     )
   }
 
-  const canSubmit = selectedRepoData && selectedBranch && claudeConfigured && !isLoading
+  const canSubmit = selectedRepoData && selectedBranch && selectedIssue && claudeConfigured && !isLoading
 
   return (
     <Card shadow="sm" padding="lg" radius="md" withBorder>
@@ -184,15 +181,6 @@ export function NewAgentForm({
           </Alert>
         )}
 
-        <TextInput
-          label="Title"
-          description="Optional. Auto-generated from repo/issue if empty."
-          placeholder="My awesome feature"
-          value={title}
-          onChange={e => setTitle(e.currentTarget.value)}
-          disabled={isCreating}
-        />
-
         <Select
           label="Repository"
           description="Select a GitHub repository"
@@ -225,8 +213,8 @@ export function NewAgentForm({
 
           <Select
             label="Issue"
-            description="Optional GitHub issue to work on"
-            placeholder={isLoadingRepoData ? 'Loading...' : 'Select issue (optional)'}
+            description="GitHub issue for the agent to work on"
+            placeholder={isLoadingRepoData ? 'Loading...' : 'Select issue'}
             data={issues.map(i => ({
               value: String(i.number),
               label: `#${i.number}: ${i.title}`,
@@ -234,8 +222,8 @@ export function NewAgentForm({
             value={selectedIssue}
             onChange={setSelectedIssue}
             disabled={!selectedRepo || isLoadingRepoData || isCreating}
-            clearable
             nothingFoundMessage="No open issues found"
+            required
           />
         </Group>
 

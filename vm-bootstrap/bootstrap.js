@@ -5,19 +5,21 @@
  * This script runs once on initial VM provisioning to:
  * 1. Fetch credentials from Cloud Run using GCE identity token
  * 2. Clone the target repository
- * 3. Configure Claude Code with MCP servers
- * 4. Update agent status to 'running'
+ * 3. Update agent status to 'running'
+ *
+ * Note: MCP server configuration has been moved to provision.sh (baked into VM image).
+ * Figma MCP is added dynamically by pty-server.js if figmaApiKey is available.
  *
  * Security:
  * - Credentials fetched via authenticated endpoint (not stored on disk)
  * - GitHub token used via GIT_ASKPASS (not embedded in URLs)
- * - API keys written to secure files with restricted permissions
+ * - API keys held in memory only, never written to disk
  */
 
 import { execFileSync } from 'node:child_process'
-import { appendFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
-import { homedir } from 'node:os'
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { homedir } from 'node:os'
 
 const AGENT_ID = process.env.AGENT_ID
 const CLOUD_RUN_URL = process.env.CLOUD_RUN_URL
@@ -208,50 +210,8 @@ esac
   // NOTE: Do NOT delete the askpass script - it's needed for git push operations
 }
 
-/**
- * Configures Claude Code MCP servers.
- *
- * Security: Credentials are NOT written to disk here. The pty-server
- * will fetch credentials at startup and pass them via environment variables.
- * The MCP config uses $GITHUB_PERSONAL_ACCESS_TOKEN which will be set by pty-server.
- *
- * Note: Figma requires the token in the args, so we check a flag that pty-server
- * will use to know whether to include Figma MCP.
- */
-function configureClaudeCode(hasFigma) {
-  // Build MCP config for Claude (goes in ~/.claude.json)
-  // Note: MCP servers inherit environment from the parent process (claude CLI).
-  // pty-server injects GITHUB_PERSONAL_ACCESS_TOKEN into claude's environment,
-  // which MCP servers will automatically inherit. No explicit env config needed.
-  const mcpServers = {
-    github: {
-      command: 'npx',
-      args: ['-y', '@modelcontextprotocol/server-github'],
-      // No env needed - MCP servers inherit GITHUB_PERSONAL_ACCESS_TOKEN from Claude's environment
-    },
-    shopify: {
-      command: 'npx',
-      args: [
-        '-y',
-        '@shopify/dev-mcp@latest'
-      ]
-    },
-  }
-
-  // Note: Figma MCP server is added dynamically by pty-server if figmaApiKey is available
-  // because it requires the token in args, not env
-
-  const claudeConfig = { mcpServers }
-
-  // Write Claude config to user's home directory
-  const claudeConfigPath = join(homedir(), '.claude.json')
-  writeFileSync(claudeConfigPath, JSON.stringify(claudeConfig, null, 2), { mode: 0o600 })
-
-  log('info', 'Claude Code configured with MCP servers', {
-    servers: Object.keys(mcpServers),
-    hasFigma,
-  })
-}
+// NOTE: MCP server configuration has been moved to provision.sh (baked into VM image).
+// Figma MCP is added dynamically by pty-server.js if figmaApiKey is available.
 
 // NOTE: internalIp is NOT sent to status endpoint for security
 // The server fetches it from GCE metadata API when needed
@@ -272,9 +232,8 @@ async function main() {
   try {
     const credentials = await fetchCredentials()
 
-    // Configure Claude Code MCP servers (credentials are NOT written to disk)
-    // pty-server will fetch credentials and inject them via environment variables
-    configureClaudeCode(!!credentials.figmaApiKey)
+    // Note: MCP server configuration is now baked into VM image (provision.sh)
+    // Figma MCP is added dynamically by pty-server.js if figmaApiKey is available
 
     const repoDir = await cloneRepository(credentials)
 
@@ -282,7 +241,7 @@ async function main() {
     // This directory is created by systemd with correct ownership
     // Note: Only non-sensitive metadata is stored, NOT API keys or tokens
     writeFileSync(join(STATE_DIR, 'repo-dir'), repoDir, { mode: 0o600 })
-    // Note: needsResume and other metadata are fetched by pty-server from credentials endpoint
+    // Note: needsContinue and other metadata are fetched by pty-server from credentials endpoint
     // No credentials file is written to disk
 
     // Create marker file to indicate bootstrap completed successfully

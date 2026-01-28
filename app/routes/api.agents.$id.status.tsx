@@ -117,6 +117,8 @@ export async function action({ request, params }: Route.ActionArgs) {
         terminalReady: body.terminalReady,
         cloneStatus: body.cloneStatus,
         cloneError: body.cloneError,
+        // If Claude Code exits (status: stopped), next boot must use --continue
+        ...(body.status === 'stopped' ? { needsContinue: true } : {}),
         // REMOVED: internalIp - now fetched on-demand from GCE to prevent client exposure
       })
 
@@ -213,7 +215,7 @@ export async function loader({ request, params }: Route.LoaderArgs) {
     status: agent.status,
     terminalReady: agent.terminalReady,
     cloneStatus: agent.cloneStatus,
-    needsResume: agent.needsResume,
+    needsContinue: agent.needsContinue,
   })
 }
 

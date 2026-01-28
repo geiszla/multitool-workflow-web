@@ -18,11 +18,12 @@
  *
  * Security:
  * - Listens on 0.0.0.0:8080 (internal network only, no external IP)
- * - API keys fetched at startup and held in memory only (never written to disk)
- * - Credentials injected to PTY process via environment variables
+ * - Most credentials are held in memory only and injected via environment variables
+ * - Exception: Figma API key must be written to config files for MCP servers (see comments in update*ForFigma functions)
+ * - All config files have restricted permissions (0600) and VMs are auto-deleted
  */
 
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { createServer } from 'node:http'
 import { join } from 'node:path'
@@ -125,11 +126,32 @@ async function fetchCredentials() {
 }
 
 function spawnPtyProcess(repoDir) {
+  // Build allowed tools list - only include mcp__figma if token available
+  const allowedTools = ['Bash', 'mcp__github', 'mcp__shopify']
+  if (credentials && credentials.figmaApiKey) {
+    allowedTools.push('mcp__figma')
+  }
+
   // Build Claude Code command
-  // Note: needsResume is determined from credentials fetched at startup
-  const claudeArgs = ['--allowedTools=Bash']
-  if (credentials && credentials.needsResume) {
-    claudeArgs.push('--resume')
+  const claudeArgs = [
+    `--allowedTools=${allowedTools.join(',')}`,
+    '--plugin-dir=/opt/multitool-workflow', // Load workflow plugin
+  ]
+
+  // Check if resuming an existing session
+  if (credentials && credentials.needsContinue) {
+    claudeArgs.push('--continue')
+  }
+
+  // If issueNumber is provided, start with the workflow command
+  // Derive canonical GitHub issue URL from trusted fields (no user-provided URLs)
+  if (credentials && credentials.issueNumber) {
+    const issueUrl = `https://github.com/${credentials.repoOwner}/${credentials.repoName}/issues/${credentials.issueNumber}`
+    claudeArgs.push('/multitool-workflow:github-workflow')
+    claudeArgs.push(issueUrl)
+    if (credentials.instructions) {
+      claudeArgs.push(credentials.instructions)
+    }
   }
 
   // Build environment with credentials (held in memory, never written to disk)
@@ -169,7 +191,8 @@ function spawnPtyProcess(repoDir) {
 
   newPtyProcess.onData((data) => {
     if (currentSession && currentSession.ws.readyState === currentSession.ws.OPEN) {
-      currentSession.ws.send(JSON.stringify({ type: 'stdout', data }))
+      // Send stdout as binary packet for efficiency
+      currentSession.ws.send(Buffer.from(data), { binary: true })
     }
   })
 
@@ -196,23 +219,24 @@ function spawnPtyProcess(repoDir) {
 }
 
 function setupWebSocketHandlers(ws, sessionId) {
-  ws.on('message', (message) => {
+  ws.on('message', (data, isBinary) => {
+    if (isBinary) {
+      // Binary packet = stdin, write directly to PTY
+      if (ptyProcess) {
+        ptyProcess.write(data.toString())
+      }
+      return
+    }
+
+    // JSON packet = control message
     try {
-      const msg = JSON.parse(message.toString())
+      const msg = JSON.parse(data.toString())
 
       switch (msg.type) {
-        case 'stdin':
-          if (ptyProcess) {
-            ptyProcess.write(msg.data)
-          }
-          break
         case 'resize':
           if (ptyProcess && msg.cols && msg.rows) {
             ptyProcess.resize(msg.cols, msg.rows)
           }
-          break
-        case 'ping':
-          ws.send(JSON.stringify({ type: 'pong' }))
           break
         case 'takeover':
           // This is handled before calling setupWebSocketHandlers
@@ -277,6 +301,36 @@ function updateClaudeConfigForFigma(figmaApiKey) {
   }
 }
 
+/**
+ * Updates Codex config.toml with Figma MCP server if token is available.
+ * Idempotent - checks if Figma config already exists before adding.
+ *
+ * Note: This writes the Figma API key to disk in ~/.codex/config.toml.
+ * Same security mitigations as Claude config apply (restricted perms, no external IP, auto-delete).
+ */
+function updateCodexConfigForFigma(figmaApiKey) {
+  const codexConfigPath = '/home/agent/.codex/config.toml'
+  try {
+    // Read existing config to check if Figma is already configured
+    const existingConfig = readFileSync(codexConfigPath, 'utf8')
+    if (existingConfig.includes('[mcp_servers.figma]')) {
+      log('info', 'Figma MCP server already configured in Codex config, skipping')
+      return
+    }
+
+    const figmaSection = `
+[mcp_servers.figma]
+command = "npx"
+args = ["-y", "figma-developer-mcp", "--stdio", "--figma-api-key=${figmaApiKey}"]
+`
+    appendFileSync(codexConfigPath, figmaSection, { mode: 0o600 })
+    log('info', 'Added Figma MCP server to Codex config')
+  }
+  catch (error) {
+    log('warn', 'Failed to update Codex config for Figma', { error: error.message })
+  }
+}
+
 async function main() {
   log('info', 'PTY server starting')
 
@@ -303,9 +357,10 @@ async function main() {
       hasFigma: !!credentials.figmaApiKey,
     })
 
-    // If Figma token is available, update .claude.json with Figma MCP
+    // If Figma token is available, update both Claude and Codex configs with Figma MCP
     if (credentials.figmaApiKey) {
       updateClaudeConfigForFigma(credentials.figmaApiKey)
+      updateCodexConfigForFigma(credentials.figmaApiKey)
     }
   }
   catch (error) {
@@ -349,8 +404,12 @@ async function main() {
         message: 'Another session is currently active. Send { type: "takeover" } to take over.',
       }))
 
-      // Set up temporary handler for takeover
-      const takeoverHandler = (message) => {
+      // Set up temporary handler for takeover (ignores binary messages)
+      const takeoverHandler = (message, isBinary) => {
+        // Ignore binary messages during session_conflict - user may type but we can't accept it yet
+        if (isBinary) {
+          return
+        }
         try {
           const msg = JSON.parse(message.toString())
           if (msg.type === 'takeover') {

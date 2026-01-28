@@ -57,26 +57,11 @@ export interface AgentInstanceConfig {
 }
 
 /**
- * Instance status from GCE.
- */
-export type GceInstanceStatus
-  = | 'PROVISIONING'
-    | 'STAGING'
-    | 'RUNNING'
-    | 'STOPPING'
-    | 'STOPPED'
-    | 'SUSPENDING'
-    | 'SUSPENDED'
-    | 'REPAIRING'
-    | 'TERMINATED'
-
-/**
  * Instance information returned from operations.
  */
 export interface InstanceInfo {
   name: string
   zone: string
-  status: GceInstanceStatus
   internalIp?: string
 }
 
@@ -237,7 +222,6 @@ export async function createAgentInstance(
   return {
     name: instanceName,
     zone,
-    status: 'PROVISIONING',
   }
 }
 
@@ -649,7 +633,7 @@ export async function deleteInstance(
  * @param zone - GCE zone
  * @returns Instance info or null if not found
  */
-export async function getInstanceStatus(
+export async function getInstanceInfo(
   instanceName: string,
   zone = DEFAULT_ZONE,
 ): Promise<InstanceInfo | null> {
@@ -671,7 +655,6 @@ export async function getInstanceStatus(
     return {
       name: instance.name || instanceName,
       zone: instance.zone ? parseZone(instance.zone) : zone,
-      status: (instance.status || 'UNKNOWN') as GceInstanceStatus,
       internalIp,
     }
   }
@@ -700,6 +683,5 @@ export async function listAgentInstances(): Promise<InstanceInfo[]> {
   return (instances || []).map(instance => ({
     name: instance.name || '',
     zone: instance.zone ? parseZone(instance.zone) : DEFAULT_ZONE,
-    status: (instance.status || 'UNKNOWN') as GceInstanceStatus,
   }))
 }

@@ -221,7 +221,7 @@ async function queryAgentsWithPagination(
     }
 
     for (const doc of snapshot.docs) {
-      agents.push({ ...doc.data() as Agent, id: doc.id })
+      agents.push(doc.data() as Agent)
     }
 
     // If we got fewer than PAGE_SIZE, we're done
@@ -325,8 +325,8 @@ export async function runReaper(): Promise<ReaperResult> {
             await stopInstance(agent.instanceName, agent.instanceZone)
           }
 
-          // Update agent status with needsResume flag
-          await updateAgentStatus(agent.id, 'suspended', 'stopped', { needsResume: true })
+          // Update agent status with needsContinue flag
+          await updateAgentStatus(agent.id, 'suspended', 'stopped', { needsContinue: true })
 
           // eslint-disable-next-line no-console
           console.log(`Reaper: Stopped agent ${agent.id}`)

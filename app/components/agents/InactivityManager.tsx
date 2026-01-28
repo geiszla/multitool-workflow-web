@@ -5,12 +5,12 @@
  * - Warning at 13 minutes (2 min before disconnect)
  * - Disconnect at 15 minutes (closes WebSocket)
  *
- * Activity is tracked via:
- * - Keyboard/mouse activity on the page
- * - Pauses when tab is hidden
+ * Activity is tracked exclusively via WebSocket messages (stdin/stdout),
+ * matching the server-side reaper behavior. DOM events (mouse, keyboard)
+ * are NOT used to reset the inactivity timer.
  *
- * Server-side heartbeat tracking is handled by the WebSocket proxy
- * based on actual terminal I/O (stdin/stdout messages).
+ * This ensures the client and server-side reaper have consistent behavior
+ * regarding what constitutes "activity".
  */
 
 import type { ReactNode, RefObject } from 'react'
@@ -24,7 +24,7 @@ import {
   Text,
 } from '@mantine/core'
 import { IconAlertTriangle, IconPlayerPause } from '@tabler/icons-react'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react'
 
 /**
  * Inactivity state types.
@@ -54,20 +54,33 @@ interface InactivityManagerProps {
   onActivity?: () => void
   /** Children (typically the Terminal component) */
   children: ReactNode
+  /** Ref to expose activity signaling */
+  ref?: RefObject<InactivityManagerHandle | null>
+}
+
+/**
+ * Ref handle for InactivityManager to allow external activity signals.
+ */
+export interface InactivityManagerHandle {
+  /** Signal activity from WebSocket messages (stdin/stdout) */
+  signalActivity: () => void
 }
 
 /**
  * Inactivity Manager component that wraps the terminal.
  *
- * Monitors user activity and disconnects after 15 minutes of inactivity.
+ * Monitors WebSocket activity and disconnects after 15 minutes of inactivity.
  * Server-side reaper will suspend/stop the VM after inactivity threshold.
+ *
+ * Activity is tracked ONLY via WebSocket messages - DOM events (mouse, keyboard)
+ * do NOT reset the timer, matching server-side reaper behavior.
  */
 export function InactivityManager({
+  ref,
   agentId: _agentId, // Reserved for future use
   isRunning,
   terminalReady,
   terminalRef,
-  onActivity,
   children,
 }: InactivityManagerProps) {
   const [state, setState] = useState<InactivityState>('active')
@@ -76,7 +89,9 @@ export function InactivityManager({
   const disconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const warningTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const countdownIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
-  const isPausedRef = useRef<boolean>(false)
+  // Throttle activity signals to avoid excessive timer resets from stdout spam
+  const lastActivitySignalRef = useRef<number>(0)
+  const ACTIVITY_THROTTLE_MS = 5000 // Throttle to max once per 5 seconds
 
   /**
    * Clears all timers.
@@ -129,23 +144,33 @@ export function InactivityManager({
   }, [clearAllTimers, terminalRef])
 
   /**
-   * Resets timers on user activity.
+   * Resets timers on WebSocket activity (stdin/stdout).
+   * Throttled to avoid excessive resets from stdout spam.
    */
   const handleActivity = useCallback(() => {
-    if (!isRunning || !terminalReady || isPausedRef.current) {
+    if (!isRunning || !terminalReady) {
       return
     }
 
-    lastActivityRef.current = Date.now()
+    // Throttle activity signals
+    const now = Date.now()
+    if (now - lastActivitySignalRef.current < ACTIVITY_THROTTLE_MS) {
+      return
+    }
+    lastActivitySignalRef.current = now
+
+    lastActivityRef.current = now
     setState('active')
     setTimeRemaining(DISCONNECT_TIMEOUT)
 
     // Restart timers
     startTimers()
+  }, [isRunning, terminalReady, startTimers])
 
-    // Notify parent
-    onActivity?.()
-  }, [isRunning, terminalReady, startTimers, onActivity])
+  // Expose activity handler via ref for Terminal component to call
+  useImperativeHandle(ref, () => ({
+    signalActivity: handleActivity,
+  }), [handleActivity])
 
   /**
    * Extends session when user dismisses warning.
@@ -154,33 +179,9 @@ export function InactivityManager({
     handleActivity()
   }, [handleActivity])
 
-  /**
-   * Handles visibility change (pause when tab hidden).
-   */
-  useEffect(() => {
-    const handleVisibilityChange = () => {
-      if (document.hidden) {
-        // Pause timers when tab is hidden
-        isPausedRef.current = true
-        clearAllTimers()
-      }
-      else {
-        // Resume timers when tab is visible
-        isPausedRef.current = false
-
-        if (isRunning && terminalReady) {
-          // Resume with remaining time
-          startTimers()
-        }
-      }
-    }
-
-    document.addEventListener('visibilitychange', handleVisibilityChange)
-
-    return () => {
-      document.removeEventListener('visibilitychange', handleVisibilityChange)
-    }
-  }, [clearAllTimers, isRunning, terminalReady, startTimers])
+  // NOTE: Visibility change handler REMOVED intentionally.
+  // Hidden tab time still counts toward inactivity to match server-side reaper behavior.
+  // The reaper doesn't know about browser tab visibility, so the client should behave the same.
 
   /**
    * Start timers when component mounts and agent is running.
@@ -199,37 +200,10 @@ export function InactivityManager({
     }
   }, [isRunning, terminalReady, startTimers, clearAllTimers])
 
-  /**
-   * Set up global activity listeners.
-   */
-  useEffect(() => {
-    if (!isRunning || !terminalReady) {
-      return
-    }
-
-    const activityEvents = ['keydown', 'mousedown', 'mousemove', 'touchstart', 'scroll']
-
-    // Throttle activity handler to avoid excessive updates
-    let lastHandled = 0
-    const throttledHandler = () => {
-      const now = Date.now()
-      if (now - lastHandled > 5000) {
-        // Throttle to every 5 seconds
-        lastHandled = now
-        handleActivity()
-      }
-    }
-
-    activityEvents.forEach((event) => {
-      document.addEventListener(event, throttledHandler, { passive: true })
-    })
-
-    return () => {
-      activityEvents.forEach((event) => {
-        document.removeEventListener(event, throttledHandler)
-      })
-    }
-  }, [isRunning, terminalReady, handleActivity])
+  // NOTE: DOM event listeners (keydown, mousedown, mousemove, etc.) REMOVED intentionally.
+  // Activity is now tracked ONLY via WebSocket messages (stdin/stdout) to match
+  // server-side reaper behavior. The Terminal component calls signalActivity()
+  // when it sends or receives WebSocket messages.
 
   /**
    * Formats remaining time for display.

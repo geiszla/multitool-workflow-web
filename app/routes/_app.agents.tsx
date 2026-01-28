@@ -39,8 +39,7 @@ interface LoaderData {
     status: string
     repoOwner: string
     repoName: string
-    issueNumber?: number
-    issueTitle?: string
+    issueNumber: number
     createdAt: string
     ownerGithubLogin: string
     isOwned: boolean
@@ -85,7 +84,6 @@ export async function loader({ request }: Route.LoaderArgs): Promise<LoaderData>
       repoOwner: agent.repoOwner,
       repoName: agent.repoName,
       issueNumber: agent.issueNumber,
-      issueTitle: agent.issueTitle,
       createdAt: agent.createdAt.toDate().toISOString(),
       ownerGithubLogin: agent.ownerGithubLogin,
       isOwned: agent.userId === user.id,
@@ -143,13 +141,12 @@ export async function action({ request }: Route.ActionArgs): Promise<ActionData>
     const repoOwner = formData.get('repoOwner') as string
     const repoName = formData.get('repoName') as string
     const branch = formData.get('branch') as string
-    const title = formData.get('title') as string
     const issueNumber = formData.get('issueNumber') as string
-    const issueTitle = formData.get('issueTitle') as string
+    const title = formData.get('title') as string
     const instructions = formData.get('instructions') as string
 
-    if (!repoOwner || !repoName || !branch) {
-      return { error: 'Repository, branch are required' }
+    if (!repoOwner || !repoName || !branch || !issueNumber || !title) {
+      return { error: 'Repository, branch, and issue are required' }
     }
 
     // Verify Claude API key is configured (unless user is comped)
@@ -158,26 +155,21 @@ export async function action({ request }: Route.ActionArgs): Promise<ActionData>
       return { error: 'Claude API key must be configured in settings' }
     }
 
-    // Validate issueNumber is a valid number if provided
-    let parsedIssueNumber: number | undefined
-    if (issueNumber) {
-      const num = Number(issueNumber)
-      if (!Number.isFinite(num) || num <= 0 || !Number.isInteger(num)) {
-        return { error: 'Invalid issue number' }
-      }
-      parsedIssueNumber = num
+    // Validate issueNumber is a valid number (required)
+    const parsedIssueNumber = Number(issueNumber)
+    if (!Number.isFinite(parsedIssueNumber) || parsedIssueNumber <= 0 || !Number.isInteger(parsedIssueNumber)) {
+      return { error: 'Invalid issue number' }
     }
 
     try {
       const agent = await createAgent({
         userId: user.id,
         ownerGithubLogin: user.githubLogin,
-        title: title || undefined,
         repoOwner,
         repoName,
         branch,
         issueNumber: parsedIssueNumber,
-        issueTitle: issueTitle || undefined,
+        title,
         instructions: instructions || undefined,
       })
 
@@ -293,7 +285,6 @@ export default function Agents() {
                     repoOwner={agent.repoOwner}
                     repoName={agent.repoName}
                     issueNumber={agent.issueNumber}
-                    issueTitle={agent.issueTitle}
                     createdAt={agent.createdAt}
                     ownerGithubLogin={agent.ownerGithubLogin}
                     isOwned={agent.isOwned}

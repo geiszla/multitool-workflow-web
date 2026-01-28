@@ -1,11 +1,11 @@
 import type { Route } from './+types/_app.agents.$id'
+import type { InactivityManagerHandle } from '~/components/agents/InactivityManager'
 import type { TerminalHandle } from '~/components/agents/Terminal'
 import type { AgentStatus } from '~/models/agent.server'
 import type { User } from '~/models/user.server'
 import {
   Alert,
   Anchor,
-  Badge,
   Button,
   Card,
   Group,
@@ -27,10 +27,10 @@ import {
   IconShare,
   IconTrash,
 } from '@tabler/icons-react'
-import { useRef, useState } from 'react'
+import { useCallback, useRef, useState } from 'react'
 import { redirect, useFetcher, useLoaderData, useNavigate } from 'react-router'
 import { AgentStatusBadge } from '~/components/agents/AgentStatusBadge'
-import { FinishModal } from '~/components/agents/FinishModal'
+import { FinalReviewModal } from '~/components/agents/FinalReviewModal'
 import { InactivityManager } from '~/components/agents/InactivityManager'
 import { ShareModal } from '~/components/agents/ShareModal'
 import { Terminal } from '~/components/agents/Terminal'
@@ -72,8 +72,7 @@ interface LoaderData {
     repoOwner: string
     repoName: string
     branch: string
-    issueNumber?: number
-    issueTitle?: string
+    issueNumber: number
     instructions?: string
     errorMessage?: string
     createdAt: string
@@ -82,11 +81,10 @@ interface LoaderData {
     stoppedAt?: string
     instanceName?: string
     instanceZone?: string
-    instanceStatus?: string
     terminalReady?: boolean
     cloneStatus?: string
     cloneError?: string
-    needsResume?: boolean
+    needsContinue?: boolean
     ownerGithubLogin: string
   }
   isOwner: boolean
@@ -126,7 +124,6 @@ export async function loader({ request, params }: Route.LoaderArgs): Promise<Loa
         repoName: agent.repoName,
         branch: agent.branch,
         issueNumber: agent.issueNumber,
-        issueTitle: agent.issueTitle,
         instructions: agent.instructions,
         errorMessage: agent.errorMessage,
         createdAt: agent.createdAt.toDate().toISOString(),
@@ -135,11 +132,10 @@ export async function loader({ request, params }: Route.LoaderArgs): Promise<Loa
         stoppedAt: agent.stoppedAt?.toDate().toISOString(),
         instanceName: agent.instanceName,
         instanceZone: agent.instanceZone,
-        instanceStatus: agent.instanceStatus,
         terminalReady: agent.terminalReady,
         cloneStatus: agent.cloneStatus,
         cloneError: agent.cloneError,
-        needsResume: agent.needsResume,
+        needsContinue: agent.needsContinue,
         ownerGithubLogin: agent.ownerGithubLogin,
       },
       isOwner,
@@ -317,7 +313,7 @@ export async function action({ request, params }: Route.ActionArgs): Promise<Act
     // Update agent status with appropriate metadata
     let metadata: Record<string, unknown> | undefined
     if (intent === 'stop') {
-      metadata = { needsResume: true }
+      metadata = { needsContinue: true }
     }
     else if (intent === 'start') {
       // For stopped -> running transition, reset terminal ready state
@@ -335,7 +331,7 @@ export async function action({ request, params }: Route.ActionArgs): Promise<Act
   }
 }
 
-// Prompt sent to Claude Code to finish work
+// Prompt sent to Claude Code to do final review
 const FINISH_PROMPT = `Please complete your work and prepare a pull request:
 
 1. Run a Codex code review on all your changes using the /review-pr skill or manually if needed
@@ -351,10 +347,11 @@ export default function AgentView() {
   const navigate = useNavigate()
   const fetcher = useFetcher<ActionData>()
   const terminalRef = useRef<TerminalHandle>(null)
+  const inactivityRef = useRef<InactivityManagerHandle>(null)
   const [deleteModalOpen, setDeleteModalOpen] = useState(false)
   const [shareModalOpen, setShareModalOpen] = useState(false)
-  const [finishModalOpen, setFinishModalOpen] = useState(false)
-  const [finishError, setFinishError] = useState<string | undefined>()
+  const [finalReviewModalOpen, setFinalReviewModalOpen] = useState(false)
+  const [finalReviewError, setFinalReviewError] = useState<string | undefined>()
 
   const { isOwner, sharedUsers: loaderSharedUsers } = loaderData
   // Use fetcher data if available (after share/unshare action)
@@ -399,22 +396,22 @@ export default function AgentView() {
     fetcher.submit({ intent: 'delete' }, { method: 'post' })
   }
 
-  const handleFinish = () => {
+  const handleFinalReview = () => {
     if (!terminalRef.current) {
-      setFinishError('Terminal is not connected')
+      setFinalReviewError('Terminal is not connected')
       return
     }
 
     if (!terminalRef.current.isConnected()) {
-      setFinishError('Terminal is not connected')
+      setFinalReviewError('Terminal is not connected')
       return
     }
 
-    // Send the finish prompt to the terminal
+    // Send the final review prompt to the terminal
     // Add newline to execute the prompt
     terminalRef.current.sendInput(`${FINISH_PROMPT}\n`)
-    setFinishModalOpen(false)
-    setFinishError(undefined)
+    setFinalReviewModalOpen(false)
+    setFinalReviewError(undefined)
   }
 
   // Determine which action buttons to show
@@ -430,7 +427,12 @@ export default function AgentView() {
   // Provisioning VMs should be deletable in case of stuck provisioning
   const canDelete = isOwner && ['failed', 'stopped', 'pending', 'suspended', 'provisioning'].includes(agent.status)
   const canShare = isOwner
-  const canFinish = isOwner && agent.status === 'running' && agent.terminalReady
+  const canDoFinalReview = isOwner && agent.status === 'running' && agent.terminalReady
+
+  // Callback for Terminal to signal activity to InactivityManager
+  const handleTerminalActivity = useCallback(() => {
+    inactivityRef.current?.signalActivity()
+  }, [])
 
   // Terminal visibility conditions
   // Terminal is shown for:
@@ -502,18 +504,15 @@ export default function AgentView() {
                   </Text>
                 </Group>
 
-                {agent.issueNumber && (
-                  <Anchor
-                    href={`https://github.com/${agent.repoOwner}/${agent.repoName}/issues/${agent.issueNumber}`}
-                    target="_blank"
-                    c="dimmed"
-                    size="sm"
-                  >
-                    #
-                    {agent.issueNumber}
-                    {agent.issueTitle && `: ${agent.issueTitle}`}
-                  </Anchor>
-                )}
+                <Anchor
+                  href={`https://github.com/${agent.repoOwner}/${agent.repoName}/issues/${agent.issueNumber}`}
+                  target="_blank"
+                  c="dimmed"
+                  size="sm"
+                >
+                  #
+                  {agent.issueNumber}
+                </Anchor>
               </Group>
             </div>
 
@@ -567,14 +566,14 @@ export default function AgentView() {
                 </Button>
               )}
 
-              {canFinish && (
+              {canDoFinalReview && (
                 <Button
                   variant="light"
                   color="green"
                   leftSection={<IconCheck size={16} />}
-                  onClick={() => setFinishModalOpen(true)}
+                  onClick={() => setFinalReviewModalOpen(true)}
                 >
-                  Finish
+                  FinalReview
                 </Button>
               )}
 
@@ -632,12 +631,18 @@ export default function AgentView() {
         {showTerminal && (
           <div style={{ height: 400 }}>
             <InactivityManager
+              ref={inactivityRef}
               agentId={agent.id}
               isRunning={agent.status === 'running'}
               terminalReady={agent.terminalReady ?? false}
               terminalRef={terminalRef}
             >
-              <Terminal ref={terminalRef} agentId={agent.id} agentStatus={agent.status} />
+              <Terminal
+                ref={terminalRef}
+                agentId={agent.id}
+                agentStatus={agent.status}
+                onActivity={handleTerminalActivity}
+              />
             </InactivityManager>
           </div>
         )}
@@ -759,17 +764,6 @@ export default function AgentView() {
                 <Text size="sm">{agent.instanceZone}</Text>
               </Group>
             )}
-
-            {agent.instanceStatus && (
-              <Group justify="space-between">
-                <Text size="sm" c="dimmed">
-                  Status
-                </Text>
-                <Badge variant="light" size="sm">
-                  {agent.instanceStatus}
-                </Badge>
-              </Group>
-            )}
           </Stack>
         </Card>
       )}
@@ -811,16 +805,16 @@ export default function AgentView() {
         sharedUsers={sharedUsers}
       />
 
-      {/* Finish Modal */}
-      <FinishModal
-        opened={finishModalOpen}
+      {/* Final review Modal */}
+      <FinalReviewModal
+        opened={finalReviewModalOpen}
         onClose={() => {
-          setFinishModalOpen(false)
-          setFinishError(undefined)
+          setFinalReviewModalOpen(false)
+          setFinalReviewError(undefined)
         }}
-        onConfirm={handleFinish}
+        onConfirm={handleFinalReview}
         isLoading={false}
-        error={finishError}
+        error={finalReviewError}
       />
     </Stack>
   )

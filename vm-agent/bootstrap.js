@@ -238,7 +238,7 @@ async function main() {
     // Write repo directory for pty-server to use
     writeFileSync('/tmp/agent-repo-dir', repoDir)
     writeFileSync('/tmp/agent-credentials', JSON.stringify({
-      needsResume: credentials.needsResume,
+      needsContinue: credentials.needsContinue,
       issueNumber: credentials.issueNumber,
       instructions: credentials.instructions,
     }))

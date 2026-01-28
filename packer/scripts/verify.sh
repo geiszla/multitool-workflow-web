@@ -18,10 +18,26 @@ NODE_VERSION=$(node --version)
 echo "Node.js: $NODE_VERSION"
 [[ "$NODE_VERSION" == v24.* ]] || { echo "ERROR: Expected Node.js 24.x"; exit 1; }
 
-# Check Claude CLI
-CLAUDE_VERSION=$(claude --version 2>&1 || echo "NOT INSTALLED")
+# Check Claude CLI (installed via bash installer to ~/.local/bin)
+echo "Checking Claude CLI..."
+[[ -f /home/agent/.local/bin/claude ]] || { echo "ERROR: Claude CLI not installed at /home/agent/.local/bin/claude"; exit 1; }
+CLAUDE_VERSION=$(su - agent -c 'claude --version' 2>&1 || echo "NOT INSTALLED")
 echo "Claude CLI: $CLAUDE_VERSION"
-[[ "$CLAUDE_VERSION" != "NOT INSTALLED" ]] || { echo "ERROR: Claude CLI not installed"; exit 1; }
+[[ "$CLAUDE_VERSION" != "NOT INSTALLED" ]] || { echo "ERROR: Claude CLI not working"; exit 1; }
+
+# Check Codex CLI (installed via npm -g)
+echo "Checking Codex CLI..."
+CODEX_VERSION=$(su - agent -c 'codex --version' 2>&1 || echo "NOT INSTALLED")
+echo "Codex CLI: $CODEX_VERSION"
+[[ "$CODEX_VERSION" != "NOT INSTALLED" ]] || { echo "ERROR: Codex CLI not working"; exit 1; }
+
+# Check Codex config exists
+echo "Checking Codex config..."
+[[ -f /home/agent/.codex/config.toml ]] || { echo "ERROR: Codex config missing at /home/agent/.codex/config.toml"; exit 1; }
+
+# Check Claude config exists
+echo "Checking Claude config..."
+[[ -f /home/agent/.claude.json ]] || { echo "ERROR: Claude config missing at /home/agent/.claude.json"; exit 1; }
 
 # Check npm dependencies
 echo "Checking npm dependencies in /opt/vm-agent..."
@@ -53,6 +69,7 @@ id agent || { echo "ERROR: agent user not found"; exit 1; }
 echo "Checking directories..."
 [[ -d /home/agent/workspace ]] || { echo "ERROR: /home/agent/workspace missing"; exit 1; }
 [[ -d /opt/vm-agent ]] || { echo "ERROR: /opt/vm-agent missing"; exit 1; }
+[[ -d /opt/multitool-workflow ]] || { echo "ERROR: /opt/multitool-workflow missing"; exit 1; }
 
 # Check bootstrap.js and pty-server.js exist
 echo "Checking script files..."

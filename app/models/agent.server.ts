@@ -49,7 +49,7 @@ export interface Agent {
   id: string // UUID
   userId: string // Internal user UUID
   ownerGithubLogin: string // Denormalized for display (avoid N+1 lookups)
-  title: string // User-provided or auto-generated title
+  title: string // Issue title (auto-populated from GitHub issue)
   status: AgentStatus
   statusVersion: number // Incremented on each status change (optimistic locking)
 
@@ -60,8 +60,7 @@ export interface Agent {
   repoOwner: string // GitHub org/user
   repoName: string // Repository name
   branch: string // Target branch
-  issueNumber?: number // GitHub issue number (optional)
-  issueTitle?: string // Cached issue title for display
+  issueNumber: number // GitHub issue number (required for workflow)
 
   // Agent configuration
   instructions?: string // Optional user instructions
@@ -75,12 +74,10 @@ export interface Agent {
   // Compute Engine instance
   instanceName?: string // GCE instance name
   instanceZone?: string // GCE zone
-  instanceStatus?: string // GCE instance status
 
   // Part 3: New fields for async provisioning and terminal
   // NOTE: internalIp is NOT stored in Firestore - fetched on-demand from GCE
   // to prevent exposure via Firestore subscriptions
-  terminalPort?: number // WebSocket port (default 8080)
   terminalReady?: boolean // True when PTY server is ready
 
   // Git operation tracking
@@ -88,7 +85,7 @@ export interface Agent {
   cloneError?: string
 
   // Resume tracking
-  needsResume?: boolean // True if stopped (not suspended), needs --resume flag
+  needsContinue?: boolean // True if stopped (not suspended), needs --continue flag
 
   // Server-side heartbeat for reaper
   lastHeartbeatAt?: Timestamp // Server-updated from WebSocket layer
@@ -104,12 +101,11 @@ export interface Agent {
 export interface CreateAgentInput {
   userId: string
   ownerGithubLogin: string // Denormalized for display
-  title?: string
   repoOwner: string
   repoName: string
   branch: string
-  issueNumber?: number
-  issueTitle?: string
+  issueNumber: number // Required for workflow auto-start
+  title: string // Agent title (from issue title)
   instructions?: string
 }
 
@@ -139,26 +135,14 @@ export interface StatusUpdateMetadata {
   errorMessage?: string
   instanceName?: string
   instanceZone?: string
-  instanceStatus?: string
   // REMOVED: internalIp - fetched on-demand from GCE to prevent client exposure
   terminalReady?: boolean
   cloneStatus?: 'pending' | 'cloning' | 'completed' | 'failed'
   cloneError?: string
-  needsResume?: boolean
+  needsContinue?: boolean
 }
 
 const AGENTS_COLLECTION = 'agents'
-
-/**
- * Generates an auto-title for an agent.
- */
-function generateTitle(repoOwner: string, repoName: string, issueNumber?: number): string {
-  const base = `${repoOwner}/${repoName}`
-  if (issueNumber) {
-    return `${base}#${issueNumber}`
-  }
-  return base
-}
 
 /**
  * Creates a new agent in Firestore.
@@ -175,14 +159,13 @@ export async function createAgent(input: CreateAgentInput): Promise<Agent> {
     id: agentId,
     userId: input.userId,
     ownerGithubLogin: input.ownerGithubLogin,
-    title: input.title || generateTitle(input.repoOwner, input.repoName, input.issueNumber),
+    title: input.title,
     status: 'pending' as const,
     statusVersion: 1,
     repoOwner: input.repoOwner,
     repoName: input.repoName,
     branch: input.branch,
     issueNumber: input.issueNumber,
-    issueTitle: input.issueTitle,
     instructions: input.instructions,
     createdAt: now,
     updatedAt: now,
@@ -375,14 +358,12 @@ export async function updateAgentStatus(
  * @param instanceInfo - Instance information
  * @param instanceInfo.instanceName - GCE instance name
  * @param instanceInfo.instanceZone - GCE zone
- * @param instanceInfo.instanceStatus - GCE instance status
  */
 export async function updateAgentInstance(
   agentId: string,
   instanceInfo: {
     instanceName?: string
     instanceZone?: string
-    instanceStatus?: string
   },
 ): Promise<void> {
   const db = getFirestore()
@@ -661,8 +642,8 @@ export async function listAccessibleAgents(userId: string): Promise<Agent[]> {
   ])
 
   const agents = [
-    ...ownedSnap.docs.map(d => ({ ...d.data() as Agent, id: d.id })),
-    ...sharedSnap.docs.map(d => ({ ...d.data() as Agent, id: d.id })),
+    ...ownedSnap.docs.map(d => d.data() as Agent),
+    ...sharedSnap.docs.map(d => d.data() as Agent),
   ]
 
   // Sort by updatedAt descending
