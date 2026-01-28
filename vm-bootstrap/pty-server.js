@@ -127,7 +127,7 @@ async function fetchCredentials() {
 
 function spawnPtyProcess(repoDir) {
   // Build allowed tools list - only include mcp__figma if token available
-  const allowedTools = ['Bash', 'mcp__github', 'mcp__shopify']
+  const allowedTools = ['Bash', 'WebFetch', 'mcp__github', 'mcp__shopify']
   if (credentials && credentials.figmaApiKey) {
     allowedTools.push('mcp__figma')
   }
@@ -220,6 +220,11 @@ function spawnPtyProcess(repoDir) {
 
 function setupWebSocketHandlers(ws, sessionId) {
   ws.on('message', (data, isBinary) => {
+    // Only accept input from the active session (prevents split-brain after takeover)
+    if (!currentSession || currentSession.sessionId !== sessionId) {
+      return
+    }
+
     if (isBinary) {
       // Binary packet = stdin, write directly to PTY
       if (ptyProcess) {
@@ -392,6 +397,9 @@ async function main() {
 
     // If there's an existing session, notify the new client and wait for takeover
     if (currentSession && currentSession.ws.readyState === currentSession.ws.OPEN) {
+      // Capture snapshot for comparison when takeover message arrives
+      const sessionAtPrompt = currentSession
+
       log('info', 'Existing session active, sending session_active message', {
         existingSessionId: currentSession.sessionId,
         newSessionId,
@@ -413,18 +421,46 @@ async function main() {
         try {
           const msg = JSON.parse(message.toString())
           if (msg.type === 'takeover') {
-            log('info', 'Takeover requested', {
-              oldSessionId: currentSession.sessionId,
-              newSessionId,
-            })
+            // Session may have disconnected - check if original session is gone
+            if (!currentSession || currentSession.ws.readyState !== currentSession.ws.OPEN) {
+              // Session disappeared - treat as fresh connection
+              log('info', 'Session disappeared before takeover, treating as fresh connection', {
+                newSessionId,
+              })
+              ws.removeListener('message', takeoverHandler)
+              currentSession = { ws, sessionId: newSessionId }
+              setupWebSocketHandlers(ws, newSessionId)
+              ws.send(JSON.stringify({ type: 'connected', sessionId: newSessionId }))
+              if (!ptyProcess) {
+                ptyProcess = spawnPtyProcess(repoDir)
+              }
+              return
+            }
 
-            // Close old session with takeover code
-            if (currentSession.ws.readyState === currentSession.ws.OPEN) {
-              currentSession.ws.send(JSON.stringify({
+            // If a different session took over while this client was deciding,
+            // close that session too (user explicitly requested takeover)
+            const sessionToClose = currentSession
+            if (currentSession !== sessionAtPrompt) {
+              log('info', 'Active session changed during takeover prompt, closing new active session', {
+                originalSessionId: sessionAtPrompt?.sessionId,
+                currentSessionId: currentSession.sessionId,
+                newSessionId,
+              })
+            }
+            else {
+              log('info', 'Takeover requested', {
+                oldSessionId: currentSession.sessionId,
+                newSessionId,
+              })
+            }
+
+            // Close current session with takeover code
+            if (sessionToClose.ws.readyState === sessionToClose.ws.OPEN) {
+              sessionToClose.ws.send(JSON.stringify({
                 type: 'session_taken_over',
                 message: 'Your session was taken over by another client.',
               }))
-              currentSession.ws.close(4409, 'Session taken over')
+              sessionToClose.ws.close(4409, 'Session taken over')
             }
 
             // Remove temporary handler

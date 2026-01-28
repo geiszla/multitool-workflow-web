@@ -12,12 +12,9 @@ import { getFirestore } from '~/services/firestore.server'
 /**
  * Agent status values.
  *
- * Note: There is no 'cancelled' or 'deleted' status. Deletion is a user-initiated
+ * Note: There is no 'deleted' status. Deletion is a user-initiated
  * action that removes the agent document from Firestore entirely (after deleting
  * the VM). The reaper never deletes VMs - it only suspends/stops.
- *
- * Note: 'completed' status was removed. When Claude Code exits normally (exit code 0),
- * the agent is marked as 'stopped' instead. Non-zero exit codes result in 'failed'.
  */
 export type AgentStatus
   = | 'pending'
@@ -389,13 +386,8 @@ export function isActiveStatus(status: AgentStatus): boolean {
 
 /**
  * Gets valid next statuses for a given status.
- * Handles legacy 'cancelled' status gracefully (returns empty array).
  */
 export function getValidTransitions(status: AgentStatus | string): AgentStatus[] {
-  // Handle legacy 'cancelled' status from old data
-  if (!(status in VALID_TRANSITIONS)) {
-    return []
-  }
   return VALID_TRANSITIONS[status as AgentStatus]
 }
 
@@ -405,7 +397,7 @@ export function getValidTransitions(status: AgentStatus | string): AgentStatus[]
  * This function uses a transaction to:
  * 1. Check the current status
  * 2. Only update to 'failed' if it's a valid transition
- * 3. Skip if already in a terminal state (completed, failed)
+ * 3. Skip if already in a terminal state (failed)
  *
  * Used when external events (VM deletion, connection errors) indicate failure.
  *

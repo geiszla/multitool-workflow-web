@@ -55,8 +55,6 @@ const STATUS_CONFIG: Record<AgentStatus, {
     label: 'Failed',
     icon: <IconX size={12} />,
   },
-  // Note: 'cancelled' and 'completed' statuses removed - agents are now deleted directly
-  // or transition to 'stopped' on normal exit
 }
 
 export function AgentStatusBadge({ status, size = 'sm' }: AgentStatusBadgeProps) {

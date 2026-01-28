@@ -14,15 +14,14 @@ import './Terminal.css'
 // Import xterm.js CSS
 import '@xterm/xterm/css/xterm.css'
 
-// Reuse TextEncoder/TextDecoder instances to avoid per-keystroke allocation
+// Reuse TextEncoder instance to avoid per-keystroke allocation
 const textEncoder = new TextEncoder()
-const textDecoder = new TextDecoder()
 
 /**
  * WebSocket message types (must match server protocol).
  */
 interface WsMessage {
-  type: 'resize' | 'error' | 'exit' | 'connected' | 'session_active' | 'session_taken_over' | 'takeover'
+  type: 'resize' | 'error' | 'exit' | 'connected' | 'session_active' | 'session_taken_over' | 'takeover' | 'vm_reconnecting'
   cols?: number
   rows?: number
   code?: number
@@ -74,6 +73,10 @@ export function Terminal({ ref, agentId, agentStatus, onActivity }: TerminalProp
   const reconnectAttemptRef = useRef(0)
   // Track online handler for cleanup on unmount
   const onlineHandlerRef = useRef<(() => void) | null>(null)
+  // TextDecoder for streaming UTF-8 (recreated per connection to avoid state leakage)
+  const textDecoderRef = useRef<TextDecoder | null>(null)
+  // Track whether reconnect is VM-leg (true) vs browser-WS (false) - used to hide attempt count
+  const isVmLegReconnectRef = useRef(false)
 
   const [connectionState, setConnectionState] = useState<ConnectionState>('connecting')
   // Ref to track connection state for terminal.onData callback (avoids stale closure)
@@ -244,20 +247,35 @@ export function Terminal({ ref, agentId, agentStatus, onActivity }: TerminalProp
     // Set binary type for proper ArrayBuffer handling
     ws.binaryType = 'arraybuffer'
 
+    // Create new TextDecoder for this connection (handles streaming UTF-8)
+    // Capture in local variable to avoid race conditions with overlapping WS instances
+    const decoder = new TextDecoder('utf-8', { fatal: false })
+    textDecoderRef.current = decoder
+
     ws.onopen = () => {
       // Wait for 'connected' or 'session_active' message to set state
       reconnectAttemptRef.current = 0
     }
 
     ws.onmessage = (event) => {
+      // Guard against stale events from old WS instances
+      if (wsRef.current !== ws) {
+        return
+      }
+
       // Check if this is a binary message (stdout data)
       if (event.data instanceof ArrayBuffer) {
-        // Binary packet = stdout, write directly to terminal
-        const text = textDecoder.decode(event.data)
-        if (xtermRef.current) {
+        // Binary packet = stdout, decode with streaming mode to handle split UTF-8
+        const text = decoder.decode(event.data, { stream: true })
+        if (xtermRef.current && text) {
           xtermRef.current.write(text)
           // Signal activity on stdout (receiving output)
           onActivity?.()
+        }
+        // If we're in reconnecting state (VM-leg), stdout arrival means VM is back
+        if (connectionStateRef.current === 'reconnecting' && isVmLegReconnectRef.current) {
+          setConnectionState('connected')
+          isVmLegReconnectRef.current = false
         }
         return
       }
@@ -271,6 +289,7 @@ export function Terminal({ ref, agentId, agentStatus, onActivity }: TerminalProp
             // Successfully connected (either fresh or after takeover)
             setConnectionState('connected')
             setActiveSessionId(null)
+            isVmLegReconnectRef.current = false
             // Send initial resize
             if (xtermRef.current && fitAddonRef.current) {
               fitAddonRef.current.fit()
@@ -278,6 +297,12 @@ export function Terminal({ ref, agentId, agentStatus, onActivity }: TerminalProp
               const resizeMsg: WsMessage = { type: 'resize', cols, rows }
               ws.send(JSON.stringify(resizeMsg))
             }
+            break
+
+          case 'vm_reconnecting':
+            // VM leg is reconnecting - show reconnecting UI (input suppressed)
+            setConnectionState('reconnecting')
+            isVmLegReconnectRef.current = true
             break
 
           case 'session_active':
@@ -308,7 +333,22 @@ export function Terminal({ ref, agentId, agentStatus, onActivity }: TerminalProp
     }
 
     ws.onclose = (event) => {
+      // Guard against stale close events - only handle if this is still the active WS
+      // or if wsRef was already nulled (normal close path)
+      if (wsRef.current !== null && wsRef.current !== ws) {
+        return
+      }
       wsRef.current = null
+
+      // Flush any buffered partial UTF-8 characters and write to terminal
+      // Only cleanup if this decoder is still the active one (prevents stomping new connection's decoder)
+      if (textDecoderRef.current === decoder) {
+        const flushed = decoder.decode(undefined, { stream: false })
+        if (xtermRef.current && flushed) {
+          xtermRef.current.write(flushed)
+        }
+        textDecoderRef.current = null
+      }
 
       // Don't auto-reconnect on:
       // - 1000: Normal close
@@ -364,6 +404,7 @@ export function Terminal({ ref, agentId, agentStatus, onActivity }: TerminalProp
 
       setConnectionState('reconnecting')
       setErrorMessage(null)
+      isVmLegReconnectRef.current = false // Browser-WS reconnect, not VM-leg
 
       // Exponential backoff with jitter for reconnection
       const baseDelay = Math.min(1000 * 2 ** attempt, 30000) // Max 30 seconds base
@@ -500,12 +541,9 @@ export function Terminal({ ref, agentId, agentStatus, onActivity }: TerminalProp
             <>
               <Loader color="orange" size="lg" />
               <Text className="terminal-overlay-text">
-                Reconnecting... (attempt
-                {' '}
-                {reconnectAttemptRef.current}
-                /
-                {MAX_RETRY_ATTEMPTS}
-                )
+                {isVmLegReconnectRef.current
+                  ? 'Reconnecting to VM...'
+                  : `Reconnecting... (attempt ${reconnectAttemptRef.current}/${MAX_RETRY_ATTEMPTS})`}
               </Text>
               <Text size="sm" c="dimmed" ta="center" mt="xs">
                 Connection was interrupted. Attempting to reconnect...

@@ -7,9 +7,6 @@
 
 /**
  * Agent status values.
- *
- * Note: 'completed' status was removed. When Claude Code exits normally (exit code 0),
- * the agent is marked as 'stopped' instead. Non-zero exit codes result in 'failed'.
  */
 export type AgentStatus
   = | 'pending'
@@ -18,18 +15,6 @@ export type AgentStatus
     | 'suspended'
     | 'stopped'
     | 'failed'
-
-/**
- * Legacy status values that may exist in old Firestore documents.
- * These are handled gracefully but should not be used for new agents.
- */
-export type LegacyAgentStatus = 'cancelled' | 'completed'
-
-/**
- * All possible status values including legacy ones.
- * Use this type when reading from Firestore where old data may exist.
- */
-export type AnyAgentStatus = AgentStatus | LegacyAgentStatus
 
 /**
  * Valid status transitions.
@@ -48,29 +33,19 @@ const VALID_TRANSITIONS: Record<AgentStatus, AgentStatus[]> = {
 
 /**
  * Gets valid next statuses for a given status.
- * Handles legacy statuses gracefully (returns empty array).
  *
- * @param status - Agent status (supports legacy values like 'cancelled')
+ * @param status - Agent status
  */
-export function getValidTransitions(status: AnyAgentStatus): AgentStatus[] {
-  // Handle legacy statuses from old data
-  if (!(status in VALID_TRANSITIONS)) {
-    return []
-  }
+export function getValidTransitions(status: AgentStatus): AgentStatus[] {
   return VALID_TRANSITIONS[status as AgentStatus]
 }
 
 /**
  * Checks if a status is terminal (no outgoing transitions).
- * Legacy statuses like 'cancelled' are treated as terminal.
  *
- * @param status - Agent status (supports legacy values like 'cancelled')
+ * @param status - Agent status
  */
-export function isTerminalStatus(status: AnyAgentStatus): boolean {
-  // Legacy statuses are terminal
-  if (!(status in VALID_TRANSITIONS)) {
-    return true
-  }
+export function isTerminalStatus(status: AgentStatus): boolean {
   return VALID_TRANSITIONS[status as AgentStatus].length === 0
 }
 
@@ -80,6 +55,6 @@ export function isTerminalStatus(status: AnyAgentStatus): boolean {
  *
  * @param status - Agent status (supports legacy values like 'cancelled')
  */
-export function isActiveStatus(status: AnyAgentStatus): boolean {
+export function isActiveStatus(status: AgentStatus): boolean {
   return ['pending', 'provisioning', 'running'].includes(status)
 }

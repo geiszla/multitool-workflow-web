@@ -6,24 +6,23 @@
  */
 
 import type { Timestamp } from 'firebase/firestore'
-import type { AnyAgentStatus } from '~/utils/agent-status'
+import type { AgentStatus } from '~/utils/agent-status'
 import { useCallback, useEffect, useState } from 'react'
 import { useFirebaseAuth } from './useFirebaseAuth'
 
 // Re-export types from shared utility
-export type { AgentStatus, AnyAgentStatus, LegacyAgentStatus } from '~/utils/agent-status'
+export type { AgentStatus } from '~/utils/agent-status'
 export { getValidTransitions, isActiveStatus, isTerminalStatus } from '~/utils/agent-status'
 
 /**
  * Agent data from Firestore realtime subscription.
  * Only includes fields that clients can read (excludes internalIp).
- * Uses AnyAgentStatus to support legacy status values from old data.
  */
 export interface RealtimeAgent {
   id: string
   userId: string
   title: string
-  status: AnyAgentStatus
+  status: AgentStatus
   statusVersion: number
 
   // Target configuration
@@ -152,13 +151,13 @@ export function useAgentRealtime(agentId: string): UseAgentRealtimeResult {
 /**
  * Checks if agent status is active (requires terminal connection).
  */
-export function isAgentActive(status: AnyAgentStatus): boolean {
+export function isAgentActive(status: AgentStatus): boolean {
   return ['running'].includes(status)
 }
 
 /**
  * Checks if agent can be resumed.
  */
-export function canResumeAgent(status: AnyAgentStatus): boolean {
+export function canResumeAgent(status: AgentStatus): boolean {
   return ['suspended', 'stopped'].includes(status)
 }

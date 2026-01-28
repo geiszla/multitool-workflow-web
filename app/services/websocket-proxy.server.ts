@@ -58,7 +58,15 @@ function getAllowedOrigins(): string[] {
 /**
  * WebSocket message types (must match VM pty-server protocol).
  */
-export type WsMessageType = 'resize' | 'error' | 'exit'
+export type WsMessageType
+  = | 'resize' // Client -> VM
+    | 'takeover' // Client -> VM
+    | 'connected' // VM -> Client
+    | 'session_active' // VM -> Client
+    | 'session_taken_over' // VM -> Client
+    | 'vm_reconnecting' // Proxy -> Client (new)
+    | 'error' // VM/Proxy -> Client
+    | 'exit' // VM -> Client
 
 export interface WsMessage {
   type: WsMessageType
@@ -405,7 +413,6 @@ export async function setupProxyConnection(
                 ws.close(1011, 'VM was deleted')
               }
               resolve(false)
-              return
             }
           }
           catch (checkError) {
@@ -413,8 +420,7 @@ export async function setupProxyConnection(
           }
         }
 
-        // Error will be followed by close event which handles retry
-        resolve(false)
+        // Error will be followed by close event which handles retry and resolves
       })
 
       // VM close handler with retry logic
@@ -431,13 +437,15 @@ export async function setupProxyConnection(
 
         // Don't retry if browser already disconnected
         if (!browserConnected || ws.readyState !== ws.OPEN) {
+          resolve(false)
           return
         }
 
-        // Don't retry on normal close or policy violation
-        const noRetryCodes = [1000, 1008]
+        // Don't retry on normal close, policy violation, or session takeover
+        const noRetryCodes = [1000, 1008, 4409]
         if (noRetryCodes.includes(code)) {
           ws.close(code, reason.toString())
+          resolve(false)
           return
         }
 
@@ -446,7 +454,13 @@ export async function setupProxyConnection(
           console.error(`WebSocket proxy: Max VM retry attempts (${MAX_VM_RETRY_ATTEMPTS}) reached for agent ${agentId}`)
           ws.send(JSON.stringify({ type: 'error', message: 'VM connection failed after multiple retries' }))
           ws.close(1011, 'VM reconnection failed')
+          resolve(false)
           return
+        }
+
+        // Notify browser on first retry attempt that VM leg is reconnecting
+        if (vmRetryAttempt === 0 && browserConnected && ws.readyState === ws.OPEN) {
+          ws.send(JSON.stringify({ type: 'vm_reconnecting' }))
         }
 
         // Calculate exponential backoff with jitter
@@ -463,15 +477,13 @@ export async function setupProxyConnection(
 
         // Check browser still connected after delay
         if (!browserConnected || ws.readyState !== ws.OPEN) {
+          resolve(false)
           return
         }
 
-        // Attempt reconnection
+        // Attempt reconnection - propagate result to original promise
         const reconnected = await connectToVm()
-        if (!reconnected && browserConnected && ws.readyState === ws.OPEN) {
-          // connectToVm will handle further retries via its own close handler
-          // This path is only reached if initial connection setup fails
-        }
+        resolve(reconnected)
       })
     })
   }
