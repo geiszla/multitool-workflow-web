@@ -1,0 +1,108 @@
+{
+  "numStartups": 1,
+  "installMethod": "native",
+  "autoUpdates": false,
+  "mcpServers": {
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"]
+    },
+    "shopify": {
+      "command": "npx",
+      "args": ["-y", "@shopify/dev-mcp@latest"]
+    }
+  },
+  "cachedGrowthBookFeatures": {
+    "tengu_1p_event_batch_config": {
+      "scheduledDelayMillis": 5000,
+      "maxExportBatchSize": 200,
+      "maxQueueSize": 8192
+    },
+    "tengu_mcp_tool_search": false,
+    "tengu_scratch": false,
+    "tengu_brass_pebble": false,
+    "tengu_disable_bypass_permissions_mode": false,
+    "tengu_event_sampling_config": {},
+    "tengu_marble_anvil": true,
+    "tengu_tool_pear": false,
+    "tengu_scarf_coffee": false,
+    "tengu_log_segment_events": false,
+    "tengu_log_datadog_events": true,
+    "tengu_keybinding_customization_release": true,
+    "tengu_thinkback": false,
+    "tengu_pid_based_version_locking": true,
+    "tengu_marble_kite": false,
+    "tengu_c4w_usage_limit_notifications_enabled": true,
+    "tengu-top-of-feed-tip": {
+      "tip": "",
+      "color": ""
+    },
+    "tengu_react_vulnerability_warning": false,
+    "tengu_code_diff_cli": true,
+    "tengu_pr_status_cli": true,
+    "tengu_post_compact_survey": false,
+    "tengu_claudeai_mcp_connectors": true
+  },
+  "firstStartTime": "2026-01-29T01:25:38.061Z",
+  "sonnet45MigrationComplete": true,
+  "opus45MigrationComplete": true,
+  "opusProMigrationComplete": true,
+  "thinkingMigrationComplete": true,
+  "changelogLastFetched": 1769649994518,
+  "cachedChromeExtensionInstalled": false,
+  "shiftEnterKeyBindingInstalled": true,
+  "hasCompletedOnboarding": true,
+  "lastOnboardingVersion": "2.1.23",
+  "s1mNonSubscriberAccessCache": {
+    "2133235d-902f-415d-917f-85ec8c41e3ac": {
+      "hasAccess": true,
+      "timestamp": 1769649992518
+    }
+  },
+  "lastReleaseNotesSeen": "2.1.23",
+  "projects": {
+    "/home/multitool-workflow-web": {
+      "allowedTools": [],
+      "mcpContextUris": [],
+      "mcpServers": {},
+      "enabledMcpjsonServers": [],
+      "disabledMcpjsonServers": [],
+      "hasTrustDialogAccepted": true,
+      "projectOnboardingSeenCount": 1,
+      "hasClaudeMdExternalIncludesApproved": false,
+      "hasClaudeMdExternalIncludesWarningShown": false,
+      "exampleFiles": [],
+      "reactVulnerabilityCache": {
+        "detected": false,
+        "package": null,
+        "packageName": null,
+        "version": null,
+        "packageManager": null
+      },
+      "lastCost": 0,
+      "lastAPIDuration": 0,
+      "lastAPIDurationWithoutRetries": 0,
+      "lastToolDuration": 0,
+      "lastDuration": 85940,
+      "lastLinesAdded": 0,
+      "lastLinesRemoved": 0,
+      "lastTotalInputTokens": 0,
+      "lastTotalOutputTokens": 0,
+      "lastTotalCacheCreationInputTokens": 0,
+      "lastTotalCacheReadInputTokens": 0,
+      "lastTotalWebSearchRequests": 0,
+      "lastFpsAverage": 0.99,
+      "lastFpsLow1Pct": 44.45,
+      "lastModelUsage": {},
+      "lastSessionId": "75d52ca0-088c-46d3-8e1d-b2a1a328836f"
+    }
+  },
+  "hasShownOpus45Notice": {
+    "2133235d-902f-415d-917f-85ec8c41e3ac": true
+  },
+  "subscriptionNoticeCount": 1,
+  "autoUpdatesProtectedForNative": true,
+  "officialMarketplaceAutoInstallAttempted": true,
+  "officialMarketplaceAutoInstalled": true,
+  "userID": "48067cff42ce1533de90a20e3e60e6d92eac53e2abbf63241157937aaf84952d"
+}

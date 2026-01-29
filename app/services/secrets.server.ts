@@ -95,7 +95,12 @@ export async function prefetchSecrets(): Promise<void> {
   const secretNames = [
     'github-client-id',
     'github-client-secret',
+    'github-client-id-dev',
+    'github-client-secret-dev',
     'session-secret',
+    'comped-claude-api-key',
+    'comped-codex-api-key',
+    'comped-figma-api-key',
   ]
 
   await Promise.all(secretNames.map(name => getSecret(name)))
@@ -171,7 +176,7 @@ async function getOptionalCachedCompedSecret(secretName: string): Promise<string
  * @returns The comped Claude API key
  */
 export async function getCompedClaudeApiKey(): Promise<string> {
-  return getCachedCompedSecret('compedClaudeApiKey')
+  return getCachedCompedSecret('comped-claude-api-key')
 }
 
 /**
@@ -180,7 +185,7 @@ export async function getCompedClaudeApiKey(): Promise<string> {
  * @returns The comped Codex API key
  */
 export async function getCompedCodexApiKey(): Promise<string> {
-  return getCachedCompedSecret('compedCodexApiKey')
+  return getCachedCompedSecret('comped-codex-api-key')
 }
 
 /**
@@ -189,5 +194,5 @@ export async function getCompedCodexApiKey(): Promise<string> {
  * @returns The comped Figma API key or null if not configured
  */
 export async function getCompedFigmaApiKey(): Promise<string | null> {
-  return getOptionalCachedCompedSecret('compedFigmaApiKey')
+  return getOptionalCachedCompedSecret('comped-figma-api-key')
 }

@@ -1,0 +1,17 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /agents/{agentId} {
+      allow read: if request.auth != null
+        && (
+          resource.data.userId == request.auth.uid
+          || (resource.data.sharedWith is list && request.auth.uid in resource.data.sharedWith)
+        );
+      allow write: if false;
+    }
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

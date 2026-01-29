@@ -7,21 +7,21 @@ steps:
     args:
       - build
       - -t
-      - 'eu-west3-docker.pkg.dev/$PROJECT_ID/multitool-workflow-web/app:$COMMIT_SHA'
+      - 'europe-west3-docker.pkg.dev/$PROJECT_ID/multitool-workflow-web/app:$COMMIT_SHA'
       - -t
-      - 'eu-west3-docker.pkg.dev/$PROJECT_ID/multitool-workflow-web/app:latest'
+      - 'europe-west3-docker.pkg.dev/$PROJECT_ID/multitool-workflow-web/app:latest'
       - .
 
   # Push the Docker image to Artifact Registry
   - name: gcr.io/cloud-builders/docker
     args:
       - push
-      - 'eu-west3-docker.pkg.dev/$PROJECT_ID/multitool-workflow-web/app:$COMMIT_SHA'
+      - 'europe-west3-docker.pkg.dev/$PROJECT_ID/multitool-workflow-web/app:$COMMIT_SHA'
 
   - name: gcr.io/cloud-builders/docker
     args:
       - push
-      - 'eu-west3-docker.pkg.dev/$PROJECT_ID/multitool-workflow-web/app:latest'
+      - 'europe-west3-docker.pkg.dev/$PROJECT_ID/multitool-workflow-web/app:latest'
 
   # Deploy to Cloud Run
   - name: gcr.io/google.com/cloudsdktool/cloud-sdk
@@ -31,24 +31,25 @@ steps:
       - deploy
       - multitool-workflow-web
       - --image
-      - 'eu-west3-docker.pkg.dev/$PROJECT_ID/multitool-workflow-web/app:$COMMIT_SHA'
+      - 'europe-west3-docker.pkg.dev/$PROJECT_ID/multitool-workflow-web/app:$COMMIT_SHA'
       - --region
-      - eu-west3
+      - europe-west3
       - --platform
       - managed
       - --allow-unauthenticated
+      - --service-account
+      - cloud-run-app@$PROJECT_ID.iam.gserviceaccount.com
       # VPC connector for reaching VM internal IPs (see docs/VPC-SETUP.md)
       - --vpc-connector
-      - projects/multitool-workflow-web/locations/eu-west3/connectors/cloud-run-connector
+      - projects/multitool-workflow-web/locations/europe-west3/connectors/run-to-vpc
       - --vpc-egress
       - private-ranges-only
       - --set-env-vars
       # NOTE: APP_URL must be set to your Cloud Run service URL (e.g., https://multitool-workflow-web-xxxxx-uc.a.run.app)
       # After first deployment, update this value with the actual service URL
       # REAPER_AUDIENCE and SCHEDULER_SERVICE_ACCOUNT_EMAIL are required for the reaper endpoint
-      - 'NODE_ENV=production,APP_URL=https://multitool-workflow-web-uc.a.run.app,REAPER_AUDIENCE=https://multitool-workflow-web-uc.a.run.app,SCHEDULER_SERVICE_ACCOUNT_EMAIL=scheduler-invoker@multitool-workflow-web.iam.gserviceaccount.com'
-      - --set-secrets
-      - 'GITHUB_CLIENT_ID=github-client-id:latest,GITHUB_CLIENT_SECRET=github-client-secret:latest,SESSION_SECRET=session-secret:latest'
+      - 'NODE_ENV=production,APP_URL=https://multitool-workflow-web-629475955836.europe-west3.run.app,REAPER_AUDIENCE=https://multitool-workflow-web-629475955836.europe-west3.run.app/api/internal/reaper,SCHEDULER_SERVICE_ACCOUNT_EMAIL=scheduler@$PROJECT_ID.iam.gserviceaccount.com'
+      # NOTE: App reads secrets from Secret Manager directly (no --set-secrets needed)
       - --memory
       - 512Mi
       - --cpu
@@ -66,8 +67,8 @@ steps:
 
 # Store images in Artifact Registry
 images:
-  - 'eu-west3-docker.pkg.dev/$PROJECT_ID/multitool-workflow-web/app:$COMMIT_SHA'
-  - 'eu-west3-docker.pkg.dev/$PROJECT_ID/multitool-workflow-web/app:latest'
+  - 'europe-west3-docker.pkg.dev/$PROJECT_ID/multitool-workflow-web/app:$COMMIT_SHA'
+  - 'europe-west3-docker.pkg.dev/$PROJECT_ID/multitool-workflow-web/app:latest'
 
 # Build options
 options:

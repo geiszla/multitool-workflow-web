@@ -10,13 +10,22 @@
 
 steps:
   # Step 0: Initialize git submodules (multitool-workflow plugin)
+  # Skips gracefully for local builds (gcloud builds submit) where it's not a git repo
   - name: gcr.io/cloud-builders/git
-    args: [submodule, update, --init, --recursive]
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        if [ -d .git ]; then
+          git submodule update --init --recursive
+        else
+          echo "Not a git repo, skipping submodule init (local build)"
+        fi
 
   # Step 1: Initialize Packer plugins
   - name: 'hashicorp/packer:1.11'
     entrypoint: packer
-    args: [init, packer/agent-vm.pkr.hcl]
+    args: [init, packer/]
 
   # Step 2: Build the VM image
   - name: 'hashicorp/packer:1.11'
@@ -24,13 +33,13 @@ steps:
     args:
       - build
       - -var=project_id=$PROJECT_ID
-      - -var=zone=eu-west3-a
+      - -var=zone=europe-west3-a
       - -var=build_timestamp=$BUILD_ID
       - -var=git_sha=$SHORT_SHA
       - -var=build_id=$BUILD_ID
-      - packer/agent-vm.pkr.hcl
+      - packer/
 
-  # Step 3: Cleanup old images (keep last 5)
+  # Step 3: Cleanup old images (keep pinned + last 5 non-pinned)
   - name: gcr.io/cloud-builders/gcloud
     entrypoint: bash
     args:
@@ -40,39 +49,61 @@ steps:
 
         echo "=== Cleaning up old images ==="
 
+        # Get pinned image from Cloud Run service env (if any)
+        # This is the image set via AGENT_SOURCE_IMAGE for rollback purposes
+        PINNED_IMAGE=$$(gcloud run services describe multitool-workflow-web \
+          --region=europe-west3 \
+          --format='value(spec.template.spec.containers[0].env.filter(name:AGENT_SOURCE_IMAGE).value)' 2>/dev/null || echo "")
+
+        # Extract image name from full path if needed (e.g., projects/.../images/NAME -> NAME)
+        if [ -n "$$PINNED_IMAGE" ]; then
+          PINNED_IMAGE_NAME=$$(basename "$$PINNED_IMAGE")
+          echo "Pinned image detected: $$PINNED_IMAGE_NAME"
+        else
+          PINNED_IMAGE_NAME=""
+          echo "No pinned image detected"
+        fi
+
         # List images in family, sorted by creation time (oldest first)
-        IMAGES=$(gcloud compute images list \
+        IMAGES=$$(gcloud compute images list \
           --filter="family=multitool-agent AND labels.managed-by=packer" \
           --sort-by="creationTimestamp" \
           --format="value(name)")
 
         # Count images (handle empty case properly)
-        if [ -z "$IMAGES" ]; then
+        if [ -z "$$IMAGES" ]; then
           COUNT=0
         else
-          COUNT=$(echo "$IMAGES" | wc -l)
+          COUNT=$$(echo "$$IMAGES" | wc -l)
         fi
         KEEP=5
 
-        echo "Found $COUNT images in multitool-agent family"
+        echo "Found $$COUNT images in multitool-agent family"
 
-        if [ "$COUNT" -gt "$KEEP" ]; then
-          # Delete oldest images, keeping last N
-          DELETE_COUNT=$((COUNT - KEEP))
-          echo "Deleting $DELETE_COUNT old images (keeping last $KEEP)"
-          echo "$IMAGES" | head -n "$DELETE_COUNT" | while read -r IMAGE; do
-            if [ -n "$IMAGE" ]; then
-              echo "Deleting image: $IMAGE"
-              gcloud compute images delete "$IMAGE" --quiet
+        if [ "$$COUNT" -gt "$$KEEP" ]; then
+          # Delete oldest images, keeping last N (but never delete pinned image)
+          DELETE_COUNT=$$((COUNT - KEEP))
+          echo "Deleting up to $$DELETE_COUNT old images (keeping last $$KEEP + pinned)"
+          echo "$$IMAGES" | head -n "$$DELETE_COUNT" | while read -r IMAGE; do
+            if [ -n "$$IMAGE" ]; then
+              # Skip deletion if this is the pinned image
+              if [ -n "$$PINNED_IMAGE_NAME" ] && [ "$$IMAGE" = "$$PINNED_IMAGE_NAME" ]; then
+                echo "Skipping pinned image: $$IMAGE"
+              else
+                echo "Deleting image: $$IMAGE"
+                gcloud compute images delete "$$IMAGE" --quiet || true
+              fi
             fi
           done
         else
-          echo "Only $COUNT images exist, keeping all (threshold: $KEEP)"
+          echo "Only $$COUNT images exist, keeping all (threshold: $$KEEP)"
         fi
 
         echo "=== Image cleanup complete ==="
 
 timeout: 3600s # 1 hour timeout for build
+
+serviceAccount: projects/$PROJECT_ID/serviceAccounts/image-builder@$PROJECT_ID.iam.gserviceaccount.com
 
 options:
   logging: CLOUD_LOGGING_ONLY

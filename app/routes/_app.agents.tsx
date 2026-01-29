@@ -16,7 +16,7 @@ import {
   updateAgentStatus,
 } from '~/models/agent.server'
 import { getExternalAuth, hasExternalAuth } from '~/models/external-auth.server'
-import { createAgentInstanceAsync, waitForOperation } from '~/services/compute.server'
+import { createAgentInstanceAsync, deleteInstance, waitForOperation } from '~/services/compute.server'
 import {
   listRepoBranches,
   listRepoIssues,
@@ -227,6 +227,20 @@ export async function action({ request }: Route.ActionArgs): Promise<ActionData>
           await updateAgentStatus(agent.id, fromStatus, 'failed', {
             errorMessage: `VM provisioning failed: ${errorMessage}`,
           })
+
+          // Attempt to clean up the VM to prevent cost leak
+          // Only if instanceName/instanceZone are known (GCE insert succeeded)
+          if (currentAgent?.instanceName && currentAgent?.instanceZone) {
+            try {
+              await deleteInstance(currentAgent.instanceName, currentAgent.instanceZone)
+
+              console.warn(`Cleaned up VM ${currentAgent.instanceName} after provisioning failure`)
+            }
+            catch (cleanupError) {
+              // Log but don't fail - the agent status update already succeeded
+              console.error('Failed to cleanup VM after provisioning failure:', cleanupError)
+            }
+          }
         }
         return { error: `VM provisioning failed: ${errorMessage}` }
       }

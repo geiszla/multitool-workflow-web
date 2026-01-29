@@ -22,7 +22,4 @@ export async function loader() {
   })
 }
 
-// No UI needed for health check
-export default function Healthz() {
-  return null
-}
+// No default export = resource route (no UI rendering)

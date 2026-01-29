@@ -18,12 +18,12 @@ import { getFirestore } from 'firebase/firestore'
 // These are public configuration values, not secrets
 // Uses Vite environment variables for staging/prod flexibility
 const firebaseConfig = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || 'AIzaSyDummyKeyForDevelopment',
-  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || 'multitool-workflow-web.firebaseapp.com',
-  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || 'multitool-workflow-web',
-  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || 'multitool-workflow-web.firebasestorage.app',
-  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || '123456789',
-  appId: import.meta.env.VITE_FIREBASE_APP_ID || '1:123456789:web:abcdef123456',
+  apiKey: 'AIzaSyAEVk_7ka5fpZ6LMKsUP6PJ1_9hoZOqkj8',
+  authDomain: 'multitool-workflow-web.firebaseapp.com',
+  projectId: 'multitool-workflow-web',
+  storageBucket: 'multitool-workflow-web.firebasestorage.app',
+  messagingSenderId: '629475955836',
+  appId: '1:629475955836:web:c017cfd662dc3774f6a5f9',
 }
 
 // Singleton instances

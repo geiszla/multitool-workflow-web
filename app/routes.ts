@@ -17,7 +17,6 @@ export default [
   // API routes (for VM communication)
   route('api/agents/:id/credentials', 'routes/api.agents.$id.credentials.tsx'),
   route('api/agents/:id/status', 'routes/api.agents.$id.status.tsx'),
-  route('api/agents/:id/heartbeat', 'routes/api.agents.$id.heartbeat.tsx'),
   route('api/agents/:id/resume', 'routes/api.agents.$id.resume.tsx'),
   route('api/auth/firebase-token', 'routes/api.auth.firebase-token.tsx'),
 

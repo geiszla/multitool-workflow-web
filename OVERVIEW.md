@@ -74,7 +74,7 @@ Stores agent records with status and metadata.
 - `repoOwner`, `repoName`, `branch`: Target repository
 - `issueNumber`: GitHub issue number (required for workflow auto-start)
 - `instructions?`: User instructions for the agent
-- `startedAt?`, `suspendedAt?`, `stoppedAt?`, `completedAt?`: Timestamps
+- `startedAt?`, `suspendedAt?`, `stoppedAt?`: Timestamps
 - `errorMessage?`: Error details if failed
 - `instanceName?`, `instanceZone?`: GCE instance info
 - `lastHeartbeatAt?`: Server-updated heartbeat for reaper
@@ -104,10 +104,10 @@ Valid status transitions (enforced server-side with optimistic locking):
 ```
 pending -> provisioning
 provisioning -> running | failed
-running -> suspended | stopped | completed | failed | cancelled
-suspended -> running (resume) | stopped | cancelled
-stopped -> running (start) | cancelled
-Terminal: completed, failed, cancelled (no transitions out)
+running -> suspended | stopped | failed
+suspended -> running (resume) | stopped
+stopped -> running (start)
+Terminal: failed (no transitions out)
 ```
 
 **Optimistic Locking**: `statusVersion` is incremented on each transition. Updates fail with 409 if current status doesn't match expected.
@@ -185,14 +185,14 @@ The server applies comprehensive security headers:
 - `github-client-id` - GitHub OAuth App client ID
 - `github-client-secret` - GitHub OAuth App client secret
 - `session-secret` - Session cookie signing secret (min 32 chars)
-- `compedClaudeApiKey` - Org Claude API key for comped users (optional)
-- `compedCodexApiKey` - Org Codex API key for comped users (optional)
-- `compedFigmaApiKey` - Org Figma API key for comped users (optional)
+- `comped-claude-api-key` - Org Claude API key for comped users (optional)
+- `comped-codex-api-key` - Org Codex API key for comped users (optional)
+- `comped-figma-api-key` - Org Figma API key for comped users (optional)
 
 ## Required GCP Resources
 
 ### KMS
-- Keyring: `multitool-workflow-web` (location: `eu-west3`)
+- Keyring: `multitool-workflow-web` (location: `europe-west3`)
 - Key: `api-keys` (purpose: ENCRYPT_DECRYPT)
 - IAM: Cloud Run SA has `roles/cloudkms.cryptoKeyEncrypterDecrypter`
 
@@ -457,7 +457,6 @@ New fields in `agents/{agentId}`:
 |----------|--------|------|---------|
 | `/api/agents/:id/credentials` | GET | GCE Identity | VM fetches credentials |
 | `/api/agents/:id/status` | GET/POST | GCE Identity | VM reports status |
-| `/api/agents/:id/activity` | POST | Session | Browser reports activity |
 | `/api/agents/:id/terminal` | WebSocket | Origin + Session | Terminal proxy |
 | `/api/auth/firebase-token` | GET | Session | Get Firebase custom token |
 

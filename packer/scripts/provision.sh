@@ -70,6 +70,16 @@ echo "Installing Codex CLI..."
 su - agent -c 'mkdir -p ~/.local && npm config set prefix ~/.local && npm install -g @openai/codex'
 echo "Codex CLI version: $(su - agent -c 'codex --version' 2>&1 || echo 'installed')"
 
+# Install GitHub CLI (official Debian method with signed repo)
+echo "Installing GitHub CLI..."
+curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | \
+  gpg --dearmor -o /usr/share/keyrings/githubcli-archive-keyring.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | \
+  tee /etc/apt/sources.list.d/github-cli.list
+apt-get update
+apt-get install -y gh
+echo "GitHub CLI version: $(gh --version)"
+
 # Create Codex config directory and configuration
 echo "Configuring Codex CLI..."
 mkdir -p /home/agent/.codex
@@ -82,11 +92,13 @@ sandbox_mode = "danger-full-access"
 [mcp_servers.github]
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-github"]
+startup_timeout_sec = 60
 # GITHUB_PERSONAL_ACCESS_TOKEN inherited from environment
 
 [mcp_servers.shopify]
 command = "npx"
 args = ["-y", "@shopify/dev-mcp@latest"]
+startup_timeout_sec = 60
 
 # Note: Figma MCP is added dynamically by pty-server.js if figmaApiKey is available
 EOF
@@ -133,25 +145,12 @@ chown agent:agent /etc/default/pty-server
 chmod 600 /etc/default/pty-server
 
 # /home/agent/.claude.json - writable by agent for Claude configuration
-# Pre-create with base MCP server configuration (no secrets)
+# Copy pre-configured .claude.json from vm-bootstrap
 # Note: MCP servers inherit environment from the parent process (claude CLI).
 # pty-server injects GITHUB_PERSONAL_ACCESS_TOKEN into claude's environment,
 # which MCP servers will automatically inherit. No explicit env config needed.
-echo "Configuring Claude MCP servers..."
-cat > /home/agent/.claude.json << 'EOF'
-{
-  "mcpServers": {
-    "github": {
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-github"]
-    },
-    "shopify": {
-      "command": "npx",
-      "args": ["-y", "@shopify/dev-mcp@latest"]
-    }
-  }
-}
-EOF
+echo "Configuring Claude..."
+cp /tmp/vm-bootstrap/.claude.json /home/agent/.claude.json
 chown agent:agent /home/agent/.claude.json
 chmod 600 /home/agent/.claude.json
 

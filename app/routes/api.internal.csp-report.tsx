@@ -58,7 +58,4 @@ export function loader() {
   return new Response(null, { status: 405 })
 }
 
-// No UI for API routes
-export default function CspReportApi() {
-  return null
-}
+// No default export = resource route (no UI rendering)

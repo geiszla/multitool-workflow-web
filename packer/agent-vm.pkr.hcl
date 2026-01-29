@@ -33,7 +33,7 @@ source "googlecompute" "agent_vm" {
 
   # Source image - Debian 12
   source_image_family      = "debian-12"
-  source_image_project_ids = ["debian-cloud"]
+  source_image_project_id = ["debian-cloud"]
 
   # Output image configuration
   image_name   = "multitool-agent-${local.timestamp}"
@@ -60,6 +60,11 @@ source "googlecompute" "agent_vm" {
 
 build {
   sources = ["source.googlecompute.agent_vm"]
+
+  # Create destination directories for file uploads
+  provisioner "shell" {
+    inline = ["mkdir -p /tmp/vm-bootstrap /tmp/multitool-workflow"]
+  }
 
   # Upload vm-bootstrap files to the build VM
   provisioner "file" {

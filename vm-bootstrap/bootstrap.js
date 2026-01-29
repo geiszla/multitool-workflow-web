@@ -70,6 +70,11 @@ async function fetchCredentials() {
   return response.json()
 }
 
+/**
+ * Updates agent status via Cloud Run API.
+ * Returns true on success, false on failure.
+ * This allows callers to make decisions based on whether the update succeeded.
+ */
 async function updateStatus(updates) {
   log('info', 'Updating agent status', updates)
 
@@ -88,7 +93,9 @@ async function updateStatus(updates) {
   if (!response.ok) {
     const text = await response.text()
     log('error', `Failed to update status: ${response.status} ${text}`)
+    return false
   }
+  return true
 }
 
 /**
@@ -244,12 +251,17 @@ async function main() {
     // Note: needsContinue and other metadata are fetched by pty-server from credentials endpoint
     // No credentials file is written to disk
 
-    // Create marker file to indicate bootstrap completed successfully
-    // This prevents re-running via systemd ConditionPathExists
-    writeFileSync(join(STATE_DIR, 'done'), new Date().toISOString(), { mode: 0o600 })
+    // CRITICAL: Transition to running FIRST, before writing done marker
+    // This prevents a race condition where the done marker exists but the status
+    // update failed, leaving the agent stuck in 'provisioning' state
+    const statusUpdated = await updateStatus({ status: 'running' })
+    if (!statusUpdated) {
+      throw new Error('Failed to update agent status to running')
+    }
 
-    // Transition to running - server will fetch internalIp from GCE
-    await updateStatus({ status: 'running' })
+    // Only write done marker AFTER successful status transition
+    // This ensures bootstrap will re-run if status update fails
+    writeFileSync(join(STATE_DIR, 'done'), new Date().toISOString(), { mode: 0o600 })
 
     log('info', 'Bootstrap completed successfully')
   }

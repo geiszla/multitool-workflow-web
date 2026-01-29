@@ -14,7 +14,7 @@ variable "project_id" {
 variable "zone" {
   type        = string
   description = "GCE zone for building the image"
-  default     = "eu-west3-a"
+  default     = "europe-west3-a"
 }
 
 variable "build_timestamp" {

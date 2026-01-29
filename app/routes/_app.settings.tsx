@@ -202,24 +202,26 @@ export default function Settings() {
           </ExternalToolCard>
         )}
 
-        {/* Figma API - always shown (optional tool) */}
-        <ExternalToolCard
-          title="Figma"
-          description="Access token for Figma MCP server (optional)"
-          icon={<IconBrandFigma size={20} />}
-          isConfigured={tools.figma.configured}
-        >
-          <ApiKeyInput
-            toolName="figma"
-            label="Figma Access Token"
-            placeholder="figd_..."
+        {/* Figma API - hidden for comped users */}
+        {!isComped && (
+          <ExternalToolCard
+            title="Figma"
+            description="Access token for Figma MCP server (optional)"
+            icon={<IconBrandFigma size={20} />}
             isConfigured={tools.figma.configured}
-            keySuffix={tools.figma.suffix}
-            isLoading={isLoading && loadingTool === 'figma'}
-            onSave={key => handleSave('figma', key)}
-            onDelete={() => handleDelete('figma')}
-          />
-        </ExternalToolCard>
+          >
+            <ApiKeyInput
+              toolName="figma"
+              label="Figma Access Token"
+              placeholder="figd_..."
+              isConfigured={tools.figma.configured}
+              keySuffix={tools.figma.suffix}
+              isLoading={isLoading && loadingTool === 'figma'}
+              onSave={key => handleSave('figma', key)}
+              onDelete={() => handleDelete('figma')}
+            />
+          </ExternalToolCard>
+        )}
       </Stack>
     </Stack>
   )

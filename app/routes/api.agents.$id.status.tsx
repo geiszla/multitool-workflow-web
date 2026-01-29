@@ -219,7 +219,4 @@ export async function loader({ request, params }: Route.LoaderArgs) {
   })
 }
 
-// No UI for API routes
-export default function StatusApi() {
-  return null
-}
+// No default export = resource route (no UI rendering)

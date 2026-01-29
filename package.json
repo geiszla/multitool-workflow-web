@@ -10,11 +10,17 @@
     "dev": "react-router dev",
     "start": "node build/server.js",
     "typecheck": "react-router typegen && tsc",
-    "lint": "eslint . --fix"
+    "lint": "eslint . --fix",
+    "deploy-server": "gcloud builds submit --config=cloudbuild.yaml --region=europe-west3 --substitutions=COMMIT_SHA=$(date +%Y%m%d-%H%M%S)",
+    "build-vm": "gcloud builds submit --config=cloudbuild-packer.yaml --region=europe-west3 --substitutions=SHORT_SHA=$(date +%Y%m%d-%H%M%S)",
+    "rollback-vm": "f() { gcloud run services update multitool-workflow-web --region=europe-west3 --set-env-vars=AGENT_SOURCE_IMAGE=projects/multitool-workflow-web/global/images/multitool-agent-$1; }; f",
+    "use-latest-vm": "gcloud run services update multitool-workflow-web --region=europe-west3 --remove-env-vars=AGENT_SOURCE_IMAGE",
+    "claude": "claude --plugin-dir='multitool-workflow' --allowedTools='Bash,WebFetch,mcp__github,mcp__figma,mcp__shopify'"
   },
   "dependencies": {
     "@google-cloud/compute": "^6.7.0",
     "@google-cloud/firestore": "^8.2.0",
+    "@google-cloud/iam-credentials": "^4.2.1",
     "@google-cloud/kms": "^5.2.1",
     "@google-cloud/secret-manager": "^6.1.1",
     "@mantine/core": "^8.3.13",
@@ -34,6 +40,7 @@
     "react-router": "7.13.0",
     "remix-auth": "^4.2.0",
     "remix-auth-github": "^3.0.2",
+    "sirv": "^3.0.2",
     "ws": "^8.19.0"
   },
   "devDependencies": {
@@ -48,6 +55,7 @@
     "eslint": "^9.39.2",
     "eslint-plugin-react-hooks": "^7.0.1",
     "eslint-plugin-react-refresh": "^0.4.26",
+    "firebase-tools": "^15.4.0",
     "postcss": "^8.5.6",
     "postcss-preset-mantine": "^1.18.0",
     "postcss-simple-vars": "^7.0.1",

@@ -14,7 +14,7 @@ import { InstancesClient, ZoneOperationsClient } from '@google-cloud/compute'
 import { env, GCP_PROJECT_ID } from './env.server'
 
 // Default configuration
-const DEFAULT_ZONE = 'eu-west3-a'
+const DEFAULT_ZONE = 'europe-west3-a'
 const DEFAULT_MACHINE_TYPE = 'e2-medium'
 const DEFAULT_DISK_SIZE_GB = 20
 const NETWORK_NAME = 'default'
@@ -135,7 +135,7 @@ export async function waitForOperation(
  * Creates a new GCE instance for an agent.
  *
  * @param config - Agent instance configuration
- * @param zone - GCE zone (default: eu-west3-a)
+ * @param zone - GCE zone (default: europe-west3-a)
  * @returns Instance information
  */
 export async function createAgentInstance(
@@ -230,7 +230,7 @@ export async function createAgentInstance(
  * Returns operation ID for tracking provisioning status.
  *
  * @param config - Agent instance configuration
- * @param zone - GCE zone (default: eu-west3-a)
+ * @param zone - GCE zone (default: europe-west3-a)
  * @returns Async creation result with operation ID
  */
 export async function createAgentInstanceAsync(

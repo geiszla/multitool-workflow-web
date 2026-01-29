@@ -23,7 +23,7 @@
  * - All config files have restricted permissions (0600) and VMs are auto-deleted
  */
 
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { createServer } from 'node:http'
 import { join } from 'node:path'
@@ -138,17 +138,19 @@ function spawnPtyProcess(repoDir) {
     '--plugin-dir=/opt/multitool-workflow', // Load workflow plugin
   ]
 
-  // Check if resuming an existing session
+  // MUTUALLY EXCLUSIVE: either resume with --continue OR start fresh with workflow
+  // When resuming, we only use --continue to restore the conversation.
+  // We do NOT re-add the workflow command - Claude Code will continue from where it left off.
   if (credentials && credentials.needsContinue) {
+    // Resume: only use --continue, do NOT re-run workflow
     claudeArgs.push('--continue')
   }
-
-  // If issueNumber is provided, start with the workflow command
-  // Derive canonical GitHub issue URL from trusted fields (no user-provided URLs)
-  if (credentials && credentials.issueNumber) {
+  else if (credentials && credentials.issueNumber) {
+    // Fresh start: add workflow command
+    // Derive canonical GitHub issue URL from trusted fields (no user-provided URLs)
     const issueUrl = `https://github.com/${credentials.repoOwner}/${credentials.repoName}/issues/${credentials.issueNumber}`
-    claudeArgs.push('/multitool-workflow:github-workflow')
-    claudeArgs.push(issueUrl)
+    claudeArgs.push(`/multitool-workflow:github-workflow ${issueUrl}`)
+
     if (credentials.instructions) {
       claudeArgs.push(credentials.instructions)
     }
@@ -271,6 +273,37 @@ function setupWebSocketHandlers(ws, sessionId) {
 }
 
 /**
+ * Writes auth.json with API keys for Claude Code.
+ * Claude Code reads this file for provider authentication.
+ *
+ * Note: This writes API keys to disk in ~/.claude/auth.json.
+ * Mitigations:
+ * - File permissions are restricted to agent user (mode 0o600)
+ * - VM has no external IP, limiting attack surface
+ * - Disk is auto-deleted when VM is deleted
+ */
+function writeAuthJson(codexApiKey) {
+  const authJsonPath = join(homedir(), '.claude', 'auth.json')
+  try {
+    // Ensure .claude directory exists
+    const claudeDir = join(homedir(), '.claude')
+    if (!existsSync(claudeDir)) {
+      mkdirSync(claudeDir, { recursive: true, mode: 0o700 })
+    }
+
+    const authData = {
+      OPENAI_API_KEY: codexApiKey,
+    }
+
+    writeFileSync(authJsonPath, JSON.stringify(authData, null, 2), { mode: 0o600 })
+    log('info', 'Wrote auth.json with API keys')
+  }
+  catch (error) {
+    log('warn', 'Failed to write auth.json', { error: error.message })
+  }
+}
+
+/**
  * Updates .claude.json with Figma MCP server if token is available.
  * This is done at runtime since the Figma token needs to be in args.
  *
@@ -327,6 +360,7 @@ function updateCodexConfigForFigma(figmaApiKey) {
 [mcp_servers.figma]
 command = "npx"
 args = ["-y", "figma-developer-mcp", "--stdio", "--figma-api-key=${figmaApiKey}"]
+startup_timeout_sec = 60
 `
     appendFileSync(codexConfigPath, figmaSection, { mode: 0o600 })
     log('info', 'Added Figma MCP server to Codex config')
@@ -366,6 +400,11 @@ async function main() {
     if (credentials.figmaApiKey) {
       updateClaudeConfigForFigma(credentials.figmaApiKey)
       updateCodexConfigForFigma(credentials.figmaApiKey)
+    }
+
+    // Write auth.json with OpenAI API key for Claude Code (in addition to env var)
+    if (credentials.codexApiKey) {
+      writeAuthJson(credentials.codexApiKey)
     }
   }
   catch (error) {

@@ -47,7 +47,4 @@ export function action() {
   return json({ error: 'Method not allowed' }, { status: 405 })
 }
 
-// No UI for API routes
-export default function FirebaseTokenApi() {
-  return null
-}
+// No default export = resource route (no UI rendering)

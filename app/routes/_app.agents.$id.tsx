@@ -627,9 +627,9 @@ export default function AgentView() {
       )}
 
       {/* Terminal / Status Display */}
-      <Card shadow="sm" padding="lg" radius="md" withBorder style={{ minHeight: 450 }}>
+      <Card shadow="sm" padding="lg" radius="md" withBorder style={{ minHeight: 900 }}>
         {showTerminal && (
-          <div style={{ height: 400 }}>
+          <div style={{ height: 800 }}>
             <InactivityManager
               ref={inactivityRef}
               agentId={agent.id}

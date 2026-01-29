@@ -1,6 +1,6 @@
 # Multitool Workflow Web - Infrastructure Setup Guide
 
-This guide covers all infrastructure setup tasks that must be completed outside of code. The project uses Google Cloud Platform in the `eu-west3` region.
+This guide covers all infrastructure setup tasks that must be completed outside of code. The project uses Google Cloud Platform in the `europe-west3` region.
 
 ## Prerequisites
 
@@ -13,13 +13,13 @@ Recommended shell vars (used throughout this doc):
 
 ```bash
 export PROJECT_ID="multitool-workflow-web"
-export REGION="eu-west3" # sometimes `europe-west3` is used
-export ZONE="eu-west3-a"
+export REGION="europe-west3"
+export ZONE="europe-west3-a"
 export SERVICE_NAME="multitool-workflow-web"
 export NETWORK="default"
 export CONNECTOR_NAME="run-to-vpc"
 export CONNECTOR_RANGE="10.8.0.0/28"
-export APP_URL="https://YOUR_CLOUD_RUN_URL" # no trailing slash
+export APP_URL="https://multitool-workflow-web-629475955836.europe-west3.run.app" # no trailing slash
 gcloud config set project "$PROJECT_ID"
 gcloud auth application-default set-quota-project "$PROJECT_ID"
 ```
@@ -47,28 +47,6 @@ gcloud services enable \
 
 ---
 
-## 0.1 Create Artifact Registry Repository
-
-Create the Docker repository for storing container images:
-
-```bash
-gcloud artifacts repositories create multitool-workflow-web \
-  --repository-format=docker \
-  --location=eu-west3 \
-  --description="Docker images for multitool-workflow-web"
-```
-
-Grant Cloud Build permission to push to Artifact Registry:
-
-```bash
-PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')
-gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --member="serviceAccount:${PROJECT_NUMBER}@cloudbuild.gserviceaccount.com" \
-  --role="roles/artifactregistry.writer"
-```
-
----
-
 ## 1. GitHub OAuth App
 
 Create a GitHub OAuth App for authentication.
@@ -77,9 +55,9 @@ Create a GitHub OAuth App for authentication.
 
 1. Go to GitHub → Settings → Developer settings → OAuth Apps → New OAuth App
 2. Configure:
-   - **Application name**: `Multitool Workflow Web`
-   - **Homepage URL**: `https://your-app-url.run.app`
-   - **Authorization callback URL**: `https://your-app-url.run.app/auth/github/callback`
+   - **Application name**: `Multitool Workflow`
+   - **Homepage URL**: `https://multitool-workflow-web-629475955836.europe-west3.run.app`
+   - **Authorization callback URL**: `https://multitool-workflow-web-629475955836.europe-west3.run.app/auth/github/callback`
 3. Note the **Client ID** and generate a **Client Secret**
 
 ---
@@ -103,6 +81,16 @@ echo -n "YOUR_GITHUB_CLIENT_SECRET" | gcloud secrets create github-client-secret
   --locations="$REGION" \
   --data-file=-
 
+echo -n "YOUR_DEVELOPMENT_GITHUB_CLIENT_ID" | gcloud secrets create github-client-id-dev \
+  --replication-policy="user-managed" \
+  --locations="$REGION" \
+  --data-file=-
+
+echo -n "YOUR_DEVELOPMENT_GITHUB_CLIENT_SECRET" | gcloud secrets create github-client-secret-dev \
+  --replication-policy="user-managed" \
+  --locations="$REGION" \
+  --data-file=-
+
 # Generate a secure 32+ character session secret (strip trailing newline)
 openssl rand -base64 32 | tr -d '\n' | gcloud secrets create session-secret \
   --replication-policy="user-managed" \
@@ -110,18 +98,18 @@ openssl rand -base64 32 | tr -d '\n' | gcloud secrets create session-secret \
   --data-file=-
 
 # Optional: Comped user secrets (organization API keys)
-echo -n "YOUR_ORG_CLAUDE_API_KEY" | gcloud secrets create compedClaudeApiKey \
+echo -n "YOUR_ORG_CLAUDE_API_KEY" | gcloud secrets create comped-claude-api-key \
   --replication-policy="user-managed" \
   --locations="$REGION" \
   --data-file=-
 
-echo -n "YOUR_ORG_CODEX_API_KEY" | gcloud secrets create compedCodexApiKey \
+echo -n "YOUR_ORG_CODEX_API_KEY" | gcloud secrets create comped-codex-api-key \
   --replication-policy="user-managed" \
   --locations="$REGION" \
   --data-file=-
 
 # Optional: Comped Figma API key
-echo -n "YOUR_ORG_FIGMA_API_KEY" | gcloud secrets create compedFigmaApiKey \
+echo -n "YOUR_ORG_FIGMA_API_KEY" | gcloud secrets create comped-figma-api-key \
   --replication-policy="user-managed" \
   --locations="$REGION" \
   --data-file=-
@@ -154,17 +142,8 @@ gcloud kms keys create api-keys \
 ### 4.1 Cloud Run Service Account
 
 ```bash
-# Get the default Cloud Run service account (or create a dedicated one)
-# Default is: PROJECT_NUMBER-compute@developer.gserviceaccount.com
-
-# Get project number
-PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')
-CLOUD_RUN_SA="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
-
-# Or create a dedicated service account
 gcloud iam service-accounts create cloud-run-app \
   --display-name="Cloud Run Application"
-CLOUD_RUN_SA="cloud-run-app@${PROJECT_ID}.iam.gserviceaccount.com"
 ```
 
 ### 4.2 Agent VM Service Account
@@ -181,6 +160,13 @@ gcloud iam service-accounts create scheduler \
   --display-name="Cloud Scheduler Service Account"
 ```
 
+### 4.4 Image Builder Service Account
+
+```bash
+gcloud iam service-accounts create image-builder \
+  --display-name="VM Image Builder Service Account"
+```
+
 ---
 
 ## 5. IAM Permissions
@@ -189,7 +175,6 @@ gcloud iam service-accounts create scheduler \
 
 ```bash
 CLOUD_RUN_SA="cloud-run-app@${PROJECT_ID}.iam.gserviceaccount.com"
-# Or use default: CLOUD_RUN_SA="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
 
 # KMS Encrypter/Decrypter for API key encryption
 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
@@ -235,6 +220,19 @@ gcloud projects add-iam-policy-binding "$PROJECT_ID" \
 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
     --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
     --role="roles/artifactregistry.writer"
+
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+    --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
+    --role="roles/run.developer"
+
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+    --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
+    --role="roles/secretmanager.secretAccessor"
+
+gcloud iam service-accounts add-iam-policy-binding \
+  "cloud-run-app@${PROJECT_ID}.iam.gserviceaccount.com" \
+  --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
+  --role="roles/iam.serviceAccountUser"
 ```
 
 ### 5.2 Agent VM Service Account Permissions
@@ -264,6 +262,39 @@ PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format='value(projectN
 gcloud iam service-accounts add-iam-policy-binding "${SCHEDULER_SA}" \
   --member="serviceAccount:service-${PROJECT_NUMBER}@gcp-sa-cloudscheduler.iam.gserviceaccount.com" \
   --role="roles/iam.serviceAccountTokenCreator"
+```
+
+### 5.4 Cloud Build Builder Service Account Permissions
+
+```bash
+BUILDER_SA="image-builder@${PROJECT_ID}.iam.gserviceaccount.com"
+PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')
+
+# Allow Cloud Build to write logs
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+    --member="serviceAccount:${BUILDER_SA}" \
+    --role="roles/logging.logWriter"
+
+# Allow Cloud Build to create/delete images + build VMs (Packer)
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+    --member="serviceAccount:${BUILDER_SA}" \
+    --role="roles/compute.instanceAdmin.v1"
+
+# Needed for the pinned-image lookup in cloudbuild-packer.yaml cleanup step
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${BUILDER_SA}" \
+  --role="roles/run.viewer"
+
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+    --member="serviceAccount:${BUILDER_SA}" \
+    --role="roles/storage.objectViewer"
+
+# Packer creates a temporary VM; grant serviceAccountUser on the service account
+# being attached to that VM (often the default Compute Engine SA).
+gcloud iam service-accounts add-iam-policy-binding \
+  "${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
+  --member="serviceAccount:${BUILDER_SA}" \
+  --role="roles/iam.serviceAccountUser"
 ```
 
 ---
@@ -375,12 +406,9 @@ Firebase is used for real-time client updates.
 ### 10.1 Link Firebase to GCP Project
 
 ```bash
-# Install Firebase CLI if not already installed
-npm install -g firebase-tools
-
 # Login and initialize
-firebase login
-firebase projects:addfirebase "$PROJECT_ID"
+pnpm firebase login
+pnpm firebase projects:addfirebase "$PROJECT_ID"
 ```
 
 In Firebase Console, ensure:
@@ -397,26 +425,7 @@ The browser uses the Firebase client SDK (see `app/services/firebase.client.ts`)
    - Register app with a nickname (e.g., "Multitool Web")
    - Copy the `firebaseConfig` object from the setup instructions
 
-2. **Configure environment variables** in `.env.production`:
-
-   ```bash
-   # Firebase Client Configuration (public, baked into client bundle)
-   VITE_FIREBASE_API_KEY=your-api-key
-   VITE_FIREBASE_AUTH_DOMAIN=your-project.firebaseapp.com
-   VITE_FIREBASE_PROJECT_ID=your-project-id
-   VITE_FIREBASE_STORAGE_BUCKET=your-project.appspot.com
-   VITE_FIREBASE_MESSAGING_SENDER_ID=123456789
-   VITE_FIREBASE_APP_ID=1:123456789:web:abcdef123456
-   ```
-
    These values are *public configuration* (not secrets). They are baked into the client bundle during `pnpm build` and used by `app/services/firebase.client.ts`.
-
-3. **For local development**, copy the same values to `.env`:
-
-   ```bash
-   cp .env.production .env
-   # Edit .env as needed for local development
-   ```
 
 **Important**: If these values are missing or incorrect, real-time updates will not work (the client cannot connect to Firebase).
 
@@ -425,7 +434,7 @@ The browser uses the Firebase client SDK (see `app/services/firebase.client.ts`)
 If this repo hasn’t been initialized for Firebase yet, do it once:
 
 ```bash
-firebase init firestore
+pnpm firebase init firestore
 ```
 
 Create/update the `firestore.rules` file:
@@ -452,7 +461,7 @@ service cloud.firestore {
 Deploy the rules:
 
 ```bash
-firebase deploy --only firestore:rules --project "$PROJECT_ID"
+pnpm firebase deploy --only firestore:rules --project "$PROJECT_ID"
 ```
 
 ---
@@ -475,27 +484,77 @@ gcloud scheduler jobs create http agent-vm-reaper \
 
 ---
 
-## 12. VM Image Build Pipeline
+## 12. Cloud Build GitHub Connection
+
+Create a connection to GitHub for Cloud Build triggers. This is required for the CI/CD deployment trigger in section 15.
+
+### 12.1 Grant Secret Manager Permissions to Cloud Build
+
+Cloud Build needs Secret Manager permissions to store GitHub connection credentials:
+
+```bash
+PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:service-${PROJECT_NUMBER}@gcp-sa-cloudbuild.iam.gserviceaccount.com" \
+  --role="roles/secretmanager.admin"
+
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:service-${PROJECT_NUMBER}@gcp-sa-cloudbuild.iam.gserviceaccount.com" \
+  --role="roles/pubsub.subscriber"
+```
+
+### 12.2 Create a GitHub Connection
+
+```bash
+gcloud builds connections create github github-connection \
+  --region="$REGION"
+```
+
+This outputs a URL to authorize Cloud Build with GitHub. Open that URL and complete the OAuth flow.
+
+### 12.3 Link Your Repository
+
+Link your GitHub repository to the connection:
+
+```bash
+gcloud builds repositories create multitool-workflow-web \
+  --connection=github-connection \
+  --region="$REGION" \
+  --remote-uri=https://github.com/geiszla/multitool-workflow-web.git
+```
+
+---
+
+## 13. VM Image Build Pipeline
 
 Automated weekly builds of VM images with pre-installed dependencies.
 
-### 12.1 Create Pub/Sub Topic for Build Triggers
+### 13.1 Create Pub/Sub Topic for Build Triggers
 
 ```bash
 gcloud pubsub topics create packer-build-trigger
 ```
 
-### 12.2 Create Cloud Build Trigger
+### 13.2 Create Cloud Build Trigger
 
 ```bash
 gcloud builds triggers create pubsub \
   --name=build-vm-image \
+  --service-account="projects/${PROJECT_ID}/serviceAccounts/image-builder@${PROJECT_ID}.iam.gserviceaccount.com" \
   --topic="projects/${PROJECT_ID}/topics/packer-build-trigger" \
   --build-config=cloudbuild-packer.yaml \
+  --repository="projects/${PROJECT_ID}/locations/${REGION}/connections/github-connection/repositories/multitool-workflow-web" \
+  --branch="main" \
   --region="$REGION"
 ```
 
-### 12.3 Create Weekly Scheduler Job
+Note: To **update the trigger**, delete it and recreate it with the same name:
+
+```bash
+gcloud builds triggers delete build-vm-image --region="$REGION"
+```
+
+### 13.3 Create Weekly Scheduler Job
 
 ```bash
 gcloud scheduler jobs create pubsub weekly-vm-image-build \
@@ -507,24 +566,13 @@ gcloud scheduler jobs create pubsub weekly-vm-image-build \
   --description="Weekly VM image rebuild (Sundays 02:00 UTC)"
 ```
 
-### 12.4 Grant Cloud Build Permissions
+### 13.4 Grant Scheduler Permissions
+
+Ensure you’ve configured the Cloud Build builder service account permissions (see section 5.4), then allow the Cloud Scheduler service agent to publish to Pub/Sub for weekly image builds:
 
 ```bash
 PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')
-CLOUD_BUILD_SA="${PROJECT_NUMBER}@cloudbuild.gserviceaccount.com"
 
-# Compute Admin for creating images
-gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --member="serviceAccount:${CLOUD_BUILD_SA}" \
-  --role="roles/compute.admin"
-
-# Service Account User for using the agent-vm service account
-gcloud iam service-accounts add-iam-policy-binding \
-  "agent-vm@${PROJECT_ID}.iam.gserviceaccount.com" \
-  --member="serviceAccount:${CLOUD_BUILD_SA}" \
-  --role="roles/iam.serviceAccountUser"
-
-# Allow Cloud Scheduler service agent to publish to Pub/Sub for weekly image builds
 gcloud pubsub topics add-iam-policy-binding packer-build-trigger \
   --member="serviceAccount:service-${PROJECT_NUMBER}@gcp-sa-cloudscheduler.iam.gserviceaccount.com" \
   --role="roles/pubsub.publisher"
@@ -532,9 +580,18 @@ gcloud pubsub topics add-iam-policy-binding packer-build-trigger \
 
 ---
 
-## 13. Cloud Run Deployment
+## 14. Cloud Run Deployment
 
-### 13.1 Initial Deployment
+### 14.1 Create Artifact Registry Repository
+
+```bash
+gcloud artifacts repositories create multitool-workflow-web \
+    --repository-format=docker \
+    --location="$REGION" \
+    --description="Docker images for multitool-workflow-web"
+```
+
+### 14.2 Initial Deployment
 
 ```bash
 # Build and deploy
@@ -546,10 +603,10 @@ gcloud run deploy "$SERVICE_NAME" \
   --service-account="cloud-run-app@${PROJECT_ID}.iam.gserviceaccount.com" \
   --vpc-connector="$CONNECTOR_NAME" \
   --vpc-egress=private-ranges-only \
-  --set-env-vars="NODE_ENV=production,APP_URL=https://YOUR_FINAL_URL,REAPER_AUDIENCE=https://YOUR_FINAL_URL/api/internal/reaper,SCHEDULER_SERVICE_ACCOUNT_EMAIL=scheduler@${PROJECT_ID}.iam.gserviceaccount.com"
+  --set-env-vars="NODE_ENV=production,APP_URL=https://multitool-workflow-web-629475955836.europe-west3.run.app,REAPER_AUDIENCE=https://multitool-workflow-web-629475955836.europe-west3.run.app/api/internal/reaper,SCHEDULER_SERVICE_ACCOUNT_EMAIL=scheduler@${PROJECT_ID}.iam.gserviceaccount.com"
 ```
 
-### 13.2 Enable WebSocket Support
+### 14.2 Enable WebSocket Support
 
 WebSocket support is enabled by default on Cloud Run. Enable session affinity if needed:
 
@@ -561,18 +618,17 @@ gcloud run services update "$SERVICE_NAME" \
 
 ---
 
-## 14. Cloud Build CI/CD (Optional)
+## 15. Cloud Build CI/CD (Optional)
 
 Set up automatic deployment on push to main.
 
 Note: If you deploy via `cloudbuild.yaml`, ensure its `gcloud run deploy` step includes the same `--service-account`, `--vpc-connector`, `--vpc-egress`, and required env vars as the manual deploy command above.
 
 ```bash
-# Connect repository (interactive)
+# Create the deployment trigger (uses GitHub connection from section 12)
 gcloud builds triggers create github \
   --name=deploy-on-push \
-  --repo-owner=YOUR_GITHUB_ORG \
-  --repo-name=multitool-workflow-web \
+  --repository="projects/${PROJECT_ID}/locations/${REGION}/connections/github-connection/repositories/multitool-workflow-web" \
   --branch-pattern="^main$" \
   --build-config=cloudbuild.yaml \
   --region="$REGION"
@@ -580,7 +636,7 @@ gcloud builds triggers create github \
 
 ---
 
-## 15. Environment Variables Summary
+## 16. Environment Variables Summary
 
 Set these environment variables for Cloud Run:
 
@@ -594,13 +650,13 @@ Set these environment variables for Cloud Run:
 
 ---
 
-## 16. Verification Checklist
+## 17. Verification Checklist
 
 After completing setup, verify:
 
 - [ ] `gcloud kms keys list --keyring=multitool-workflow-web --location=$REGION` shows `api-keys`
 - [ ] `gcloud secrets list` shows all required secrets
-- [ ] `gcloud iam service-accounts list` shows `agent-vm` and `scheduler` accounts
+- [ ] `gcloud iam service-accounts list` shows `agent-vm`, `scheduler`, and `image-builder` accounts
 - [ ] `gcloud compute routers nats list --router=agent-router --region=$REGION` shows NAT config
 - [ ] `gcloud compute firewall-rules list` shows `allow-internal-pty`
 - [ ] `gcloud scheduler jobs list --location=$REGION` shows `agent-vm-reaper` and `weekly-vm-image-build`
@@ -610,7 +666,7 @@ After completing setup, verify:
 
 ---
 
-## 17. Manual Build Trigger
+## 18. Manual Build Trigger
 
 To manually trigger a VM image build:
 
@@ -626,7 +682,7 @@ gcloud pubsub topics publish packer-build-trigger --message='{"trigger": "manual
 
 ---
 
-## 18. Rollback Procedure
+## 19. Rollback Procedure
 
 To roll back to a specific VM image:
 

@@ -18,7 +18,7 @@ import { KeyManagementServiceClient } from '@google-cloud/kms'
 import { GCP_PROJECT_ID } from './env.server'
 
 // KMS configuration
-const KMS_LOCATION = 'eu-west3'
+const KMS_LOCATION = 'europe-west3'
 const KMS_KEYRING = 'multitool-workflow-web'
 const KMS_KEY = 'api-keys'
 

@@ -11,14 +11,37 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import crypto from 'node:crypto'
 import { createServer } from 'node:http'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { createRequestListener } from '@react-router/node'
+import sirv from 'sirv'
 import { WebSocketServer } from 'ws'
 import { setupProxyConnection } from '~/services/websocket-proxy.server'
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
 // Import the built React Router app
 const requestHandler = createRequestListener({
   // @ts-expect-error - Build output is dynamic
   build: () => import('./build/server/index.js'),
+})
+
+// Static file serving for production assets from build/client
+const clientDir = path.join(__dirname, 'client')
+
+// Hashed assets with immutable caching (1 year)
+const assetsHandler = sirv(path.join(clientDir, 'assets'), {
+  maxAge: 31536000,
+  immutable: true,
+  gzip: true,
+  brotli: true,
+})
+
+// Other client files with shorter cache (1 hour)
+const clientHandler = sirv(clientDir, {
+  maxAge: 3600,
+  gzip: true,
+  brotli: true,
 })
 
 const PORT = Number(process.env.PORT) || 3000
@@ -79,15 +102,29 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
   // @ts-expect-error - Adding custom property for nonce
   res.locals = { cspNonce: nonce }
 
-  try {
-    // Handle HTTP requests through React Router
-    await requestHandler(req, res)
+  const url = req.url || '/'
+
+  // Serve hashed assets from /assets/* with immutable caching
+  if (url.startsWith('/assets/')) {
+    req.url = url.slice(7)
+    assetsHandler(req, res, () => {
+      res.statusCode = 404
+      res.end('Not Found')
+    })
+    return
   }
-  catch (error) {
-    console.error('Request handler error:', error)
-    res.statusCode = 500
-    res.end('Internal Server Error')
-  }
+
+  // Try other static files, fall through to React Router if not found
+  clientHandler(req, res, () => {
+    try {
+      requestHandler(req, res)
+    }
+    catch (error) {
+      console.error('Request handler error:', error)
+      res.statusCode = 500
+      res.end('Internal Server Error')
+    }
+  })
 })
 
 // Create WebSocket server attached to the HTTP server
@@ -103,17 +140,32 @@ server.on('upgrade', async (request, socket, head) => {
   if (terminalMatch) {
     const agentId = terminalMatch[1]
 
-    wss.handleUpgrade(request, socket, head, async (ws) => {
-      const result = await setupProxyConnection(ws, request, agentId)
+    wss.handleUpgrade(request, socket, head, (ws) => {
+      // Use IIFE + catch to handle async errors properly
+      // This prevents unhandled promise rejections from crashing the server
+      (async () => {
+        try {
+          const result = await setupProxyConnection(ws, request, agentId)
 
-      if (!result.success) {
-        // Send error message and close
-        ws.send(JSON.stringify({
-          type: 'error',
-          message: result.error,
-        }))
-        ws.close(result.errorCode || 1008, result.error)
-      }
+          if (!result.success) {
+            // Send error message and close
+            ws.send(JSON.stringify({
+              type: 'error',
+              message: result.error,
+            }))
+            ws.close(result.errorCode || 1008, result.error)
+          }
+        }
+        catch (error) {
+          console.error('WebSocket setup error:', error)
+          try {
+            ws.close(1011, 'Internal server error')
+          }
+          catch {
+            // Ignore close errors - socket may already be closed
+          }
+        }
+      })()
     })
   }
   else {
@@ -132,9 +184,16 @@ server.listen(PORT, () => {
 process.on('SIGTERM', () => {
   // eslint-disable-next-line no-console
   console.log('SIGTERM received, shutting down gracefully')
+
+  // Close WebSocket server and all connections
+  wss.close(() => {
+    // eslint-disable-next-line no-console
+    console.log('WebSocket server closed')
+  })
+
   server.close(() => {
     // eslint-disable-next-line no-console
-    console.log('Server closed')
+    console.log('HTTP server closed')
     process.exit(0)
   })
 })

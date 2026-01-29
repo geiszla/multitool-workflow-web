@@ -12,7 +12,7 @@ WORKDIR /app
 # Stage 2: Install all dependencies (including dev) for building
 # ==============================================================================
 FROM base AS deps
-COPY package.json pnpm-lock.yaml ./
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile
 
 # ==============================================================================
@@ -32,7 +32,7 @@ RUN pnpm build
 # Stage 4: Production dependencies only
 # ==============================================================================
 FROM base AS prod-deps
-COPY package.json pnpm-lock.yaml ./
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile --prod
 
 # ==============================================================================

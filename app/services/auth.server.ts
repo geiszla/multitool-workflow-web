@@ -15,7 +15,7 @@ import { Octokit } from '@octokit/rest'
 import { createCookie } from 'react-router'
 import { Authenticator } from 'remix-auth'
 import { GitHubStrategy } from 'remix-auth-github'
-import { env } from './env.server'
+import { env, isDevelopment } from './env.server'
 import { getSecret } from './secrets.server'
 
 /**
@@ -137,8 +137,9 @@ export async function getAndClearReturnTo(
  * Uses lazy initialization because secrets may not be available at build time.
  */
 async function createAuthenticator(): Promise<Authenticator<GitHubAuthResult>> {
-  const clientId = await getSecret('github-client-id')
-  const clientSecret = await getSecret('github-client-secret')
+  const suffix = isDevelopment() ? '-dev' : ''
+  const clientId = await getSecret(`github-client-id${suffix}`)
+  const clientSecret = await getSecret(`github-client-secret${suffix}`)
 
   const oauthCookie
     = process.env.NODE_ENV === 'production'

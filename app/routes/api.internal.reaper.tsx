@@ -39,7 +39,4 @@ export function loader() {
   return json({ error: 'Method not allowed' }, { status: 405 })
 }
 
-// No UI for API routes
-export default function ReaperApi() {
-  return null
-}
+// No default export = resource route (no UI rendering)

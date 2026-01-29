@@ -11,14 +11,10 @@
  *
  * Required IAM Permission:
  * The Cloud Run service account needs `iam.serviceAccounts.signJwt` permission
- * on itself. Grant the "Service Account Token Creator" role:
- *
- *   gcloud iam service-accounts add-iam-policy-binding \
- *     PROJECT_NUMBER-compute@developer.gserviceaccount.com \
- *     --member="serviceAccount:PROJECT_NUMBER-compute@developer.gserviceaccount.com" \
- *     --role="roles/iam.serviceAccountTokenCreator"
+ * on itself. Grant the "Service Account Token Creator" role.
  */
 
+import { IAMCredentialsClient } from '@google-cloud/iam-credentials'
 import { GoogleAuth } from 'google-auth-library'
 import { GCP_PROJECT_ID } from './env.server'
 
@@ -26,16 +22,22 @@ import { GCP_PROJECT_ID } from './env.server'
 // Uses the default Cloud Run service account
 let serviceAccountEmail: string | null = null
 
-// Lazy-initialized auth client
+// Lazy-initialized clients
 let authClient: GoogleAuth | null = null
+let iamCredentialsClient: IAMCredentialsClient | null = null
 
 function getAuthClient(): GoogleAuth {
   if (!authClient) {
-    authClient = new GoogleAuth({
-      scopes: ['https://www.googleapis.com/auth/cloud-platform'],
-    })
+    authClient = new GoogleAuth()
   }
   return authClient
+}
+
+function getIAMCredentialsClient(): IAMCredentialsClient {
+  if (!iamCredentialsClient) {
+    iamCredentialsClient = new IAMCredentialsClient()
+  }
+  return iamCredentialsClient
 }
 
 /**
@@ -54,7 +56,7 @@ async function getServiceAccountEmail(): Promise<string> {
   }
   else {
     // In production Cloud Run, this will be the default service account
-    serviceAccountEmail = `${GCP_PROJECT_ID}@appspot.gserviceaccount.com`
+    serviceAccountEmail = `cloud-run-app@${GCP_PROJECT_ID}.iam.gserviceaccount.com`
   }
 
   return serviceAccountEmail
@@ -96,8 +98,8 @@ export async function createCustomToken(
     }
   }
 
-  const auth = getAuthClient()
   const saEmail = await getServiceAccountEmail()
+  const client = getIAMCredentialsClient()
 
   const now = Math.floor(Date.now() / 1000)
 
@@ -113,38 +115,31 @@ export async function createCustomToken(
     claims, // Custom claims go inside 'claims' object
   }
 
-  // Use IAM Credentials API signJwt endpoint
-  // The signJwt endpoint expects a JSON string claim-set (not header.payload)
-  // It handles the JWT header and signature internally
-  const iamUrl = `https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/${saEmail}:signJwt`
+  // Use IAM Credentials API signJwt method
+  // The client handles authentication automatically via ADC
+  try {
+    const [response] = await client.signJwt({
+      name: `projects/-/serviceAccounts/${saEmail}`,
+      payload: JSON.stringify(claimSet),
+    })
 
-  const accessToken = await auth.getAccessToken()
-  const response = await fetch(iamUrl, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${accessToken}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      payload: JSON.stringify(claimSet), // JSON string of claim-set, NOT header.payload
-    }),
-  })
+    if (!response.signedJwt) {
+      throw new Error('signJwt returned empty response')
+    }
 
-  if (!response.ok) {
-    const text = await response.text()
+    return response.signedJwt
+  }
+  catch (error) {
     // Provide helpful error message for common IAM permission issue
-    if (response.status === 403) {
+    const message = error instanceof Error ? error.message : String(error)
+    if (message.includes('403') || message.includes('PERMISSION_DENIED')) {
       throw new Error(
-        `Failed to sign token: ${response.status} ${text}. `
+        `Failed to sign token: ${message}. `
         + `Ensure the service account has "Service Account Token Creator" role. `
         + `Run: gcloud iam service-accounts add-iam-policy-binding ${saEmail} `
         + `--member="serviceAccount:${saEmail}" --role="roles/iam.serviceAccountTokenCreator"`,
       )
     }
-    throw new Error(`Failed to sign token: ${response.status} ${text}`)
+    throw error
   }
-
-  // Response contains the complete JWT (header + payload + signature)
-  const data = await response.json() as { signedJwt: string }
-  return data.signedJwt
 }
