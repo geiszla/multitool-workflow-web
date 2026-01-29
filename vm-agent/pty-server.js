@@ -24,11 +24,12 @@
  */
 
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { homedir } from 'node:os'
 import { createServer } from 'node:http'
+import { homedir } from 'node:os'
 import { join } from 'node:path'
 import pty from 'node-pty'
 import { WebSocketServer } from 'ws'
+import { VirtualTerminal } from './virtual-terminal.js'
 
 const PORT = 8080
 const AGENT_ID = process.env.AGENT_ID
@@ -37,8 +38,9 @@ const CLOUD_RUN_URL = process.env.CLOUD_RUN_URL
 const STATE_DIR = '/var/lib/agent-bootstrap'
 
 // Session management
-let currentSession = null // { ws, sessionId }
+let currentSession = null // { ws, sessionId, restoreSent, outputBuffer }
 let ptyProcess = null
+let virtualTerminal = null // Server-side terminal emulator for state restoration
 
 function log(level, message, data = {}) {
   console.log(JSON.stringify({
@@ -181,20 +183,38 @@ function spawnPtyProcess(repoDir) {
     }
   }
 
+  const initialCols = 80
+  const initialRows = 24
+
   const newPtyProcess = pty.spawn('claude', claudeArgs, {
     name: 'xterm-256color',
-    cols: 80,
-    rows: 24,
+    cols: initialCols,
+    rows: initialRows,
     cwd: repoDir,
     env: ptyEnv,
   })
 
   log('info', 'PTY process started', { pid: newPtyProcess.pid })
 
+  // Initialize virtual terminal for state restoration on reconnect
+  virtualTerminal = new VirtualTerminal(initialCols, initialRows, log)
+
   newPtyProcess.onData((data) => {
+    // Write to virtual terminal first (captures output even when no client connected)
+    if (virtualTerminal) {
+      virtualTerminal.write(data)
+    }
+
     if (currentSession && currentSession.ws.readyState === currentSession.ws.OPEN) {
-      // Send stdout as binary packet for efficiency
-      currentSession.ws.send(Buffer.from(data), { binary: true })
+      // Buffer output until restore is sent to avoid race condition where
+      // output arrives before restore, then gets wiped when client resets on restore
+      if (!currentSession.restoreSent) {
+        currentSession.outputBuffer.push(data)
+      }
+      else {
+        // Send stdout as binary packet for efficiency
+        currentSession.ws.send(Buffer.from(data), { binary: true })
+      }
     }
   })
 
@@ -205,6 +225,12 @@ function spawnPtyProcess(repoDir) {
       currentSession.ws.close()
     }
     ptyProcess = null
+
+    // Dispose virtual terminal when PTY exits
+    if (virtualTerminal) {
+      virtualTerminal.dispose()
+      virtualTerminal = null
+    }
 
     // Update agent status based on exit code
     // Exit code 0 = 'stopped' (normal exit), non-zero = 'failed'
@@ -218,6 +244,111 @@ function spawnPtyProcess(repoDir) {
   })
 
   return newPtyProcess
+}
+
+// Timeout for restore fallback (if client doesn't send resize)
+const RESTORE_FALLBACK_TIMEOUT_MS = 5000
+
+/**
+ * Schedule a fallback to send restore data if client doesn't send resize message.
+ * This prevents output from being buffered forever if the client misbehaves.
+ *
+ * @param {string} sessionId - Session ID to check before sending
+ */
+function scheduleRestoreFallback(sessionId) {
+  setTimeout(() => {
+    // Only send if this is still the active session and restore hasn't been sent
+    if (currentSession && currentSession.sessionId === sessionId && !currentSession.restoreSent) {
+      log('info', 'Restore fallback triggered (no resize received)', { sessionId })
+      sendRestoreData()
+    }
+  }, RESTORE_FALLBACK_TIMEOUT_MS)
+}
+
+/**
+ * Send terminal state restoration data to client and flush buffered output.
+ * Called after receiving first resize message to ensure dimensions match.
+ *
+ * This function:
+ * 1. Serializes the current terminal state at the correct dimensions
+ * 2. Sends restore message to client
+ * 3. Flushes any buffered PTY output that arrived during connection setup
+ * 4. Marks restore as sent so future output flows directly
+ */
+function sendRestoreData() {
+  if (!currentSession || currentSession.restoreSent) {
+    return
+  }
+
+  const ws = currentSession.ws
+  if (ws.readyState !== ws.OPEN) {
+    return
+  }
+
+  try {
+    // Send restore data if virtual terminal exists and has content
+    let restoreSent = false
+    if (virtualTerminal) {
+      const serializedState = virtualTerminal.serialize()
+      if (serializedState) {
+        ws.send(JSON.stringify({ type: 'restore', data: serializedState }))
+        log('info', 'Sent terminal restore data', { size: serializedState.length })
+        restoreSent = true
+      }
+    }
+
+    // Mark restore as sent
+    currentSession.restoreSent = true
+
+    // IMPORTANT: Do NOT flush the buffer if restore was sent!
+    // The serialized state already contains all buffered content.
+    // Flushing would cause duplicate output on the client.
+    // Only discard the buffer - future output goes directly to client.
+    if (restoreSent) {
+      if (currentSession.outputBuffer.length > 0) {
+        log('info', 'Discarding buffered output (already in restore snapshot)', {
+          chunks: currentSession.outputBuffer.length,
+        })
+      }
+      currentSession.outputBuffer = []
+    }
+    else {
+      // No restore sent (e.g., empty terminal or serialize returned null)
+      // Flush buffered output so user sees it
+      if (currentSession.outputBuffer.length > 0) {
+        log('info', 'Flushing buffered output (no restore snapshot)', {
+          chunks: currentSession.outputBuffer.length,
+        })
+        for (const chunk of currentSession.outputBuffer) {
+          ws.send(Buffer.from(chunk), { binary: true })
+        }
+        currentSession.outputBuffer = []
+      }
+    }
+  }
+  catch (error) {
+    // Log but continue - restore failure shouldn't break the connection
+    // Mark as sent anyway to allow output to flow
+    log('warn', 'Failed to send restore data', { error: error.message })
+    currentSession.restoreSent = true
+
+    // Restore failed - flush buffered output so user sees it
+    // This ensures users still see any output that arrived during connection setup
+    if (currentSession.outputBuffer.length > 0) {
+      log('info', 'Flushing buffered output (restore failed)', {
+        chunks: currentSession.outputBuffer.length,
+      })
+      try {
+        for (const chunk of currentSession.outputBuffer) {
+          ws.send(Buffer.from(chunk), { binary: true })
+        }
+      }
+      catch (flushError) {
+        log('warn', 'Failed to flush buffered output', { error: flushError.message })
+      }
+    }
+    currentSession.outputBuffer = []
+  }
 }
 
 function setupWebSocketHandlers(ws, sessionId) {
@@ -243,6 +374,15 @@ function setupWebSocketHandlers(ws, sessionId) {
         case 'resize':
           if (ptyProcess && msg.cols && msg.rows) {
             ptyProcess.resize(msg.cols, msg.rows)
+            // Keep virtual terminal in sync with PTY dimensions
+            if (virtualTerminal) {
+              virtualTerminal.resize(msg.cols, msg.rows)
+            }
+            // Send restore data on first resize (ensures dimensions match)
+            // This prevents sending a snapshot at stale dimensions
+            if (currentSession && !currentSession.restoreSent) {
+              sendRestoreData()
+            }
           }
           break
         case 'takeover':
@@ -273,22 +413,22 @@ function setupWebSocketHandlers(ws, sessionId) {
 }
 
 /**
- * Writes auth.json with API keys for Claude Code.
- * Claude Code reads this file for provider authentication.
+ * Writes auth.json with API keys for Codex.
+ * Codex reads this file for provider authentication.
  *
- * Note: This writes API keys to disk in ~/.claude/auth.json.
+ * Note: This writes API keys to disk in ~/.codex/auth.json.
  * Mitigations:
  * - File permissions are restricted to agent user (mode 0o600)
  * - VM has no external IP, limiting attack surface
  * - Disk is auto-deleted when VM is deleted
  */
 function writeAuthJson(codexApiKey) {
-  const authJsonPath = join(homedir(), '.claude', 'auth.json')
+  const authJsonPath = join(homedir(), '.codex', 'auth.json')
   try {
-    // Ensure .claude directory exists
-    const claudeDir = join(homedir(), '.claude')
-    if (!existsSync(claudeDir)) {
-      mkdirSync(claudeDir, { recursive: true, mode: 0o700 })
+    // Ensure .codex directory exists
+    const codexDir = join(homedir(), '.codex')
+    if (!existsSync(codexDir)) {
+      mkdirSync(codexDir, { recursive: true, mode: 0o700 })
     }
 
     const authData = {
@@ -467,9 +607,11 @@ async function main() {
                 newSessionId,
               })
               ws.removeListener('message', takeoverHandler)
-              currentSession = { ws, sessionId: newSessionId }
+              currentSession = { ws, sessionId: newSessionId, restoreSent: false, outputBuffer: [] }
               setupWebSocketHandlers(ws, newSessionId)
               ws.send(JSON.stringify({ type: 'connected', sessionId: newSessionId }))
+              // Note: restore is sent after first resize message to ensure dimensions match
+              scheduleRestoreFallback(newSessionId)
               if (!ptyProcess) {
                 ptyProcess = spawnPtyProcess(repoDir)
               }
@@ -506,11 +648,13 @@ async function main() {
             ws.removeListener('message', takeoverHandler)
 
             // Establish new session
-            currentSession = { ws, sessionId: newSessionId }
+            currentSession = { ws, sessionId: newSessionId, restoreSent: false, outputBuffer: [] }
             setupWebSocketHandlers(ws, newSessionId)
 
             // Send connected confirmation
             ws.send(JSON.stringify({ type: 'connected', sessionId: newSessionId }))
+            // Note: restore is sent after first resize message to ensure dimensions match
+            scheduleRestoreFallback(newSessionId)
 
             log('info', 'Takeover complete', { sessionId: newSessionId })
           }
@@ -532,7 +676,7 @@ async function main() {
 
     // No existing session - establish new one
     log('info', 'WebSocket connection established', { sessionId: newSessionId })
-    currentSession = { ws, sessionId: newSessionId }
+    currentSession = { ws, sessionId: newSessionId, restoreSent: false, outputBuffer: [] }
 
     // Spawn PTY process if not already running
     if (!ptyProcess) {
@@ -544,6 +688,9 @@ async function main() {
 
     // Send connected confirmation
     ws.send(JSON.stringify({ type: 'connected', sessionId: newSessionId }))
+    // Note: restore is sent after first resize message to ensure dimensions match
+    // Fallback: if client doesn't send resize within 5s, send restore anyway to prevent stuck output
+    scheduleRestoreFallback(newSessionId)
   })
 
   server.listen(PORT, '0.0.0.0', async () => {

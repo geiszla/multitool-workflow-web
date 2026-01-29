@@ -115,11 +115,12 @@ chown agent:agent /home/agent/workspace
 echo "Setting up /opt/vm-agent..."
 mkdir -p /opt/vm-agent
 
-# Copy vm-bootstrap files from upload location
-cp /tmp/vm-bootstrap/package.json /opt/vm-agent/
-cp /tmp/vm-bootstrap/package-lock.json /opt/vm-agent/
-cp /tmp/vm-bootstrap/bootstrap.js /opt/vm-agent/
-cp /tmp/vm-bootstrap/pty-server.js /opt/vm-agent/
+# Copy vm-agent files from upload location
+cp /tmp/vm-agent/package.json /opt/vm-agent/
+cp /tmp/vm-agent/package-lock.json /opt/vm-agent/
+cp /tmp/vm-agent/bootstrap.js /opt/vm-agent/
+cp /tmp/vm-agent/pty-server.js /opt/vm-agent/
+cp /tmp/vm-agent/virtual-terminal.js /opt/vm-agent/
 
 # Install npm dependencies with locked versions
 echo "Installing npm dependencies..."
@@ -133,8 +134,8 @@ chmod -R 755 /opt/vm-agent
 
 # Copy systemd service unit files
 echo "Installing systemd services..."
-cp /tmp/vm-bootstrap/systemd/agent-bootstrap.service /etc/systemd/system/
-cp /tmp/vm-bootstrap/systemd/pty-server.service /etc/systemd/system/
+cp /tmp/vm-agent/systemd/agent-bootstrap.service /etc/systemd/system/
+cp /tmp/vm-agent/systemd/pty-server.service /etc/systemd/system/
 
 # Pre-create runtime-writable files
 echo "Creating runtime files..."
@@ -145,12 +146,12 @@ chown agent:agent /etc/default/pty-server
 chmod 600 /etc/default/pty-server
 
 # /home/agent/.claude.json - writable by agent for Claude configuration
-# Copy pre-configured .claude.json from vm-bootstrap
+# Copy pre-configured .claude.json from vm-agent
 # Note: MCP servers inherit environment from the parent process (claude CLI).
 # pty-server injects GITHUB_PERSONAL_ACCESS_TOKEN into claude's environment,
 # which MCP servers will automatically inherit. No explicit env config needed.
 echo "Configuring Claude..."
-cp /tmp/vm-bootstrap/.claude.json /home/agent/.claude.json
+cp /tmp/vm-agent/.claude.json /home/agent/.claude.json
 chown agent:agent /home/agent/.claude.json
 chmod 600 /home/agent/.claude.json
 
@@ -175,7 +176,7 @@ chmod -R 755 /opt/multitool-workflow
 echo "Cleaning up..."
 apt-get clean
 rm -rf /var/lib/apt/lists/*
-rm -rf /tmp/vm-bootstrap
+rm -rf /tmp/vm-agent
 rm -rf /tmp/multitool-workflow
 
 echo "=== Agent VM Provisioning Complete ==="

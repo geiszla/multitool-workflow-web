@@ -19,7 +19,6 @@ import {
   IconAlertCircle,
   IconArrowLeft,
   IconBrandGithub,
-  IconCheck,
   IconGitBranch,
   IconPlayerPause,
   IconPlayerPlay,
@@ -427,7 +426,7 @@ export default function AgentView() {
   // Provisioning VMs should be deletable in case of stuck provisioning
   const canDelete = isOwner && ['failed', 'stopped', 'pending', 'suspended', 'provisioning'].includes(agent.status)
   const canShare = isOwner
-  const canDoFinalReview = isOwner && agent.status === 'running' && agent.terminalReady
+  // const canDoFinalReview = isOwner && agent.status === 'running' && agent.terminalReady
 
   // Callback for Terminal to signal activity to InactivityManager
   const handleTerminalActivity = useCallback(() => {
@@ -566,16 +565,16 @@ export default function AgentView() {
                 </Button>
               )}
 
-              {canDoFinalReview && (
+              {/* {canDoFinalReview && (
                 <Button
                   variant="light"
                   color="green"
                   leftSection={<IconCheck size={16} />}
                   onClick={() => setFinalReviewModalOpen(true)}
                 >
-                  FinalReview
+                  Final Review
                 </Button>
-              )}
+              )} */}
 
               {canShare && (
                 <Button
@@ -627,7 +626,7 @@ export default function AgentView() {
       )}
 
       {/* Terminal / Status Display */}
-      <Card shadow="sm" padding="lg" radius="md" withBorder style={{ minHeight: 900 }}>
+      <Card shadow="sm" padding="lg" radius="md" withBorder style={{ minHeight: 800 }}>
         {showTerminal && (
           <div style={{ height: 800 }}>
             <InactivityManager

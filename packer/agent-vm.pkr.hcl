@@ -63,13 +63,13 @@ build {
 
   # Create destination directories for file uploads
   provisioner "shell" {
-    inline = ["mkdir -p /tmp/vm-bootstrap /tmp/multitool-workflow"]
+    inline = ["mkdir -p /tmp/vm-agent /tmp/multitool-workflow"]
   }
 
-  # Upload vm-bootstrap files to the build VM
+  # Upload vm-agent files to the build VM
   provisioner "file" {
-    source      = "vm-bootstrap/"
-    destination = "/tmp/vm-bootstrap"
+    source      = "vm-agent/"
+    destination = "/tmp/vm-agent"
   }
 
   # Upload multitool-workflow plugin to the build VM

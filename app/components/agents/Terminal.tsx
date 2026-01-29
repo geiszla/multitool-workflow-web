@@ -21,12 +21,13 @@ const textEncoder = new TextEncoder()
  * WebSocket message types (must match server protocol).
  */
 interface WsMessage {
-  type: 'resize' | 'error' | 'exit' | 'connected' | 'session_active' | 'session_taken_over' | 'takeover' | 'vm_reconnecting'
+  type: 'resize' | 'error' | 'exit' | 'connected' | 'session_active' | 'session_taken_over' | 'takeover' | 'vm_reconnecting' | 'restore'
   cols?: number
   rows?: number
   code?: number
   message?: string
   sessionId?: string
+  data?: string // Terminal restore data (serialized terminal state)
 }
 
 /**
@@ -125,6 +126,7 @@ export function Terminal({ ref, agentId, agentStatus, onActivity }: TerminalProp
       cursorBlink: true,
       fontSize: 14,
       fontFamily: 'Menlo, Monaco, "Courier New", monospace',
+      scrollback: 10000, // Match server-side virtual terminal scrollback for full restore
       theme: {
         background: '#1e1e1e',
         foreground: '#d4d4d4',
@@ -296,6 +298,16 @@ export function Terminal({ ref, agentId, agentStatus, onActivity }: TerminalProp
               const { cols, rows } = xtermRef.current
               const resizeMsg: WsMessage = { type: 'resize', cols, rows }
               ws.send(JSON.stringify(resizeMsg))
+            }
+            break
+
+          case 'restore':
+            // Restore terminal state from server-side virtual terminal
+            // This happens after 'connected' message to restore previous output
+            if (xtermRef.current && msg.data) {
+              // Reset terminal to clear any existing state, then write restored data
+              xtermRef.current.reset()
+              xtermRef.current.write(msg.data)
             }
             break
 
